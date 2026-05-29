@@ -10,17 +10,15 @@ export class Bairro{
     @Column()
     nome!: string;
 
-    @OneToMany(() => Endereco, endereco => endereco.bairro, {
-        cascade: ["insert", "update"], 
-    })
+    @OneToMany(() => Endereco, endereco => endereco.bairro)
     enderecos?: Endereco[];
 
     @Column()
     cidadeId?: number;
 
-    @ManyToOne(() => Cidade, cidade => cidade.bairros, {
-    eager: true,
-    cascade: ["insert", "update"] // Adicione esta linha
+    @ManyToOne(() => Cidade, cidade => cidade.bairros, { 
+        eager: true, 
+        cascade: true 
     })
     @JoinColumn({name: 'cidadeId'})
     cidade?: Cidade

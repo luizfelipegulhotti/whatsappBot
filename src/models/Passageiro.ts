@@ -22,8 +22,12 @@ export class Passageiro {
     @ManyToOne(() => Endereco, endereco => endereco.passageiro, { cascade: true })
     endereco!: Endereco;
 
-    @ManyToOne(() => Empresa, empresa => empresa.passageiros, { cascade: true })
-    empresa!: Empresa;
+    @ManyToOne(() => Empresa, empresa => empresa.passageiros, { 
+        cascade: true,
+        nullable: true,
+        onDelete: 'SET NULL'  
+    })
+    empresa?: Empresa;
 
     @Column({ default: false })
     solicitacao?: boolean;
@@ -33,6 +37,9 @@ export class Passageiro {
 
     @ManyToOne(() => Rota, rota => rota.passageiros, {})
     rota?: Rota;
+
+    @Column({ nullable: true })
+    ordem_na_rota?: number;
 
     @Column({ type: "timestamp", default: () => "CURRENT_TIMESTAMP" })
     dataDeRegistro!: Date;

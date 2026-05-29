@@ -1,5 +1,5 @@
 import { Request, Response } from "express";
-import BairroService from "../service/endereco/bairro/BairroService";
+import BairroService from "../service/BairroService";
 
 class BairroController {
 

@@ -16,9 +16,9 @@ export class Estado{
     @Column()
     paisId?: number;
 
-    @ManyToOne(() => Pais, pais => pais.estados, {
-        cascade: ["insert", "update"], 
-        eager: true
+    @ManyToOne(() => Pais, pais => pais.estados, { 
+        eager: true,
+        cascade: true
     })
     @JoinColumn({name: 'paisId'})
     pais?: Pais;

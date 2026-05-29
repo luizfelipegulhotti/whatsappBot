@@ -16,9 +16,9 @@ export class Endereco{
     @Column()
     bairroId?: number
 
-    @ManyToOne(() => Bairro, bairro => bairro.enderecos, {
+    @ManyToOne(() => Bairro, bairro => bairro.enderecos, { 
         eager: true, 
-        cascade: ["insert", "update"]
+        cascade: true 
     })
     @JoinColumn({name: 'bairroId'})
     bairro?: Bairro;

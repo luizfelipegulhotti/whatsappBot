@@ -1,10 +1,9 @@
 import { Request, Response } from "express";
-import PassageiroService from "../service/passageiro/PassageiroService";
+import PassageiroService from "../service/PassageiroService";
 
 class PassageiroController {
 
     static async listarPassageiros(req: Request, res: Response) {
-
         const passageiros = await PassageiroService.listarPassageiros();
         return res.status(200).json(passageiros);
     };
@@ -13,6 +12,12 @@ class PassageiroController {
         const {id} = req.params;
         const passageiro = await PassageiroService.mostrarUmPassageiro(Number(id));
         return res.status(200).json(passageiro);
+    };
+
+    static async listarDisponiveis(req: Request, res: Response) {
+        const { empresaId } = req.params;
+        const passageiros = await PassageiroService.listarDisponiveisPorEmpresa(Number(empresaId));
+        return res.status(200).json(passageiros);
     };
 
     static async cadastrarPassageiro(req: Request, res: Response) {

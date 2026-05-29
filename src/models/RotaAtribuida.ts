@@ -17,6 +17,13 @@ export class RotaAtribuida {
     @ManyToOne(() => Motorista)
     motorista!: Motorista;
 
+     @Column({
+        type: "enum",
+        enum: ["ROTA", "APOIO", "PLANTAO"],
+        default: "ROTA"
+    })
+    tipoAtribuicao!: "ROTA" | "APOIO" | "PLANTAO";
+
     @ManyToOne(() => ListaJoia)
     listaJoia!: ListaJoia;
 

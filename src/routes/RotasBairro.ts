@@ -4,7 +4,7 @@ import BairroController from "../controllers/BairroController";
 const rotasBairro = Router();
 
 // Rota para listar todos os bairros:
-rotasBairro.get('/bairro', 
+rotasBairro.get('/bairros', 
     (BairroController.listarBairros)
 );
 

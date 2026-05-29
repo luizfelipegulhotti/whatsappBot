@@ -1,5 +1,5 @@
 import { Request, Response } from "express";
-import CidadeService from "../service/endereco/cidade/CidadeService";
+import CidadeService from "../service/CidadeService";
 
 class CidadeController {
     

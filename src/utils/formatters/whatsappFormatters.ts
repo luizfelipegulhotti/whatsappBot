@@ -2,27 +2,34 @@ import { ListaJoia } from "../../models/ListaJoia";
 import { RotaAtribuida } from "../../models/RotaAtribuida";
 
 export function formatarEscalaParaWhatsApp(atribuicoes: RotaAtribuida[], listaReferencia: ListaJoia): string {
-    // Garantir que 'dia' seja um objeto Date (evita erro caso venha como string do banco)
+    // Garantir que 'dia' seja um objeto Date
     const dataObj = new Date(listaReferencia.dia);
     
-    // 1. Identifica se a lista base é de um sábado para aplicar regra de 5 plantonistas
+    // 1. Regra de plantonistas baseada no dia da semana
     const eSabado = dataObj.getDay() === 6;
     const limitePlantao = eSabado ? 5 : 4;
 
-    // 2. Separação dos dados por tipo e período
-    const rotasTarde = atribuicoes.filter(a => a.rota.tipo_rota === 'ROTA_TARDE' && a.rota.tipo !== 'APOIO');
-    const rotasMadrugada = atribuicoes.filter(a => a.rota.tipo_rota === 'ROTA_MADRUGADA');
-    const motoristaApoio = atribuicoes.find(a => a.rota.tipo === 'APOIO');
+    // 2. Separação dos dados (Corrigido para usar tipoAtribuicao da entidade RotaAtribuida)
+    // Removemos a referência a a.rota.tipo que não existe mais
+    const rotasTarde = atribuicoes.filter(a => 
+        a.rota.tipo_rota === 'ROTA_TARDE' && a.tipoAtribuicao !== 'APOIO'
+    );
+    
+    const rotasMadrugada = atribuicoes.filter(a => 
+        a.rota.tipo_rota === 'ROTA_MADRUGADA' && a.tipoAtribuicao !== 'APOIO'
+    );
+
+    // Busca o motorista de apoio pelo novo campo de status
+    const motoristaApoio = atribuicoes.find(a => a.tipoAtribuicao === 'APOIO');
 
     // --- MONTAGEM DA MENSAGEM ---
-    // Corrigido: usando 'identificador' em vez de 'tipoLista'
     let mensagem = `*📋 ESCALA - ${dataObj.toLocaleDateString('pt-BR')}*\n`;
     mensagem += `*Tipo:* ${listaReferencia.identificador.replace('_', ' ')}\n\n`;
 
-    // LISTA 1: PLANTÃO (Baseado nos primeiros das rotas de madrugada)
+    // LISTA 1: PLANTÃO
     mensagem += `*🚔 PLANTÃO (MADRUGADA + APOIO):*\n`;
     
-    // Pegamos os motoristas das primeiras rotas da madrugada (únicos)
+    // Pegamos os motoristas das primeiras rotas da madrugada
     const plantonistas = [...new Set(rotasMadrugada.slice(0, limitePlantao).map(a => a.motorista.nome))];
     
     plantonistas.forEach((nome, i) => {

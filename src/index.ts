@@ -1,54 +1,80 @@
-import 'reflect-metadata'; // Importante para o TypeORM
-import express from 'express';
-import qrcode from 'qrcode-terminal';
-import { Client, LocalAuth } from 'whatsapp-web.js';
-import { AppDataSource } from "./data-source";
-import { EscalaService } from "./service/whatsapp/EscalaService";
-import { WhatsAppController } from './bot/WhatsAppController';
-import { RegistroService } from "./service/whatsapp/RegistroService";
-import middlewareErro from './middlewares/MiddlewareErro';
-import rotasMotorista from "./routes/RotasMotorista";
-import rotasAdministrador from "./routes/RotasAdministrador";
-import rotasPassageiro from './routes/RotasPassageiro';
-import rotasEndereco from './routes/RotasEndereco';
-import rotasBairro from './routes/RotasBairro';
-import rotasCidade from './routes/RotasCidade';
+import 'reflect-metadata'; 
+import express from 'express'; 
+import cors from 'cors'; 
+import path from 'path'; 
+import { AppDataSource } from "./data-source"; 
 
-const app = express();
-app.use(express.json());
+// Services e Controllers do Bot 
+import { WhatsAppController } from './bot/WhatsAppController'; 
+import { RegistroService } from "./service/whatsapp/RegistroService"; 
+import { EscalaService } from "./service/whatsapp/EscalaService"; 
 
-const client = new Client({
-    authStrategy: new LocalAuth(),
-    puppeteer: { args: ['--no-sandbox', '--disable-setuid-sandbox'] }
-});
+// Importação das Rotas 
+import rotasMotorista from "./routes/RotasMotorista"; 
+import rotasAdministrador from "./routes/RotasAdministrador"; 
+import rotasPassageiro from './routes/RotasPassageiro'; 
+import rotasEmpresa from './routes/RotasEmpresa'; 
+import rotasEndereco from './routes/RotasEndereco'; 
+import rotasBairro from './routes/RotasBairro'; 
+import rotasCidade from './routes/RotasCidade'; 
+import rotasEstado from './routes/RotasEstado'; 
+import rotasPais from './routes/RotasPais'; 
+import rotasWhatsapp from './routes/RotasWhatsApp'; 
+import rotasRota from './routes/RotasRota'; 
+import rotasAtribuicao from './routes/RotasAtrbuicao'; 
+import MiddlewareErro from './middlewares/MiddlewareErro'; 
 
-client.on('qr', qr => qrcode.generate(qr, { small: true }));
-client.on('ready', () => console.log('✅ WhatsApp conectado!'));
+const app = express(); 
+app.use(cors()); 
+app.use(express.json()); 
+app.use('/imagens', express.static(path.join(__dirname, 'public', 'imagem_uso'))); 
+app.use('/fontes', express.static(path.join(__dirname, 'public', 'imagem_fonte'))); 
 
-// Inicialização do Banco, API e Bot
-AppDataSource.initialize().then(() => {
-    console.log("🚀 Banco Conectado");
+// Exportação global do controlador para os endpoints HTTP consumirem
+export let botInstance: WhatsAppController; 
 
-    app.use(rotasMotorista);
-    app.use(rotasAdministrador);
-    app.use(rotasPassageiro);
-    app.use(rotasEndereco);
-    app.use(rotasBairro);
-    app.use(rotasCidade);
-    app.use(middlewareErro);
+async function startApp() { 
+    try { 
+        // 1. Conecta ao Banco de Dados Relacional
+        await AppDataSource.initialize(); 
+        console.log("🚀 Banco Conectado!"); 
 
-    const PORTA = 8080;
+        // 2. Instancia a Camada de Serviços
+        const registroService = new RegistroService(); 
+        const escalaService = new EscalaService(); 
 
-    app.listen(PORTA, () => {
-        console.log(`🌐 API rodando em http://localhost:${PORTA}`);
-    });
+        // 3. Inicializa o Controlador baseado na arquitetura Baileys
+        botInstance = new WhatsAppController(registroService, escalaService); 
+        
+        console.log("🤖 Iniciando WhatsApp..."); 
+        // Dispara a conexão por Socket Puro e geração automática de QR Code no terminal
+        await botInstance.inicializar(); 
 
-    // 2. Configuração do Bot
-    const registroService = new RegistroService();
-    const escalaService = new EscalaService();
-    const bot = new WhatsAppController(client, registroService, escalaService);
-    
-    bot.inicializar();
-    client.initialize();
+        // 4. Mapeamento de Rotas HTTP da API
+        app.get('/', (req, res) => res.json({ message: 'API Online' })); 
+        app.use(rotasMotorista); 
+        app.use(rotasAdministrador); 
+        app.use(rotasPassageiro); 
+        app.use(rotasEmpresa); 
+        app.use(rotasEndereco); 
+        app.use(rotasBairro); 
+        app.use(rotasCidade); 
+        app.use(rotasEstado); 
+        app.use(rotasPais); 
+        app.use(rotasRota); 
+        app.use(rotasAtribuicao); 
+        app.use(rotasWhatsapp); 
+        app.use(MiddlewareErro); 
 
-}).catch(error => console.log("❌ Erro fatal:", error));
+        // 5. Inicialização do Servidor Express na Rede Local
+        const PORTA = 8080; 
+        app.listen(PORTA, '0.0.0.0', () => { 
+            console.log(`🌐 Servidor na porta ${PORTA}`); 
+        }); 
+
+    } catch (error) { 
+        console.error("❌ Falha crítica:", error); 
+    } 
+} 
+
+startApp();

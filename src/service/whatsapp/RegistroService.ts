@@ -1,241 +1,302 @@
-import { AppDataSource } from "../../data-source";
-import { ListaJoia } from "../../models/ListaJoia";
-import { Motorista } from "../../models/Motorista";
-import { OrdemJoinha } from "../../models/OrdemJoinha";
-import { Banimento } from "../../models/Banimento";
-import { IdentificadorLista } from "../../interfaces/ITipos";
-import { Client } from "whatsapp-web.js";
-import MotoristaService from "../motorista/MotoristaService";
-import AdministradorService from "../administrador/AdministradorService";
+import { AppDataSource } from "../../data-source"; 
+import { ListaJoia } from "../../models/ListaJoia"; 
+import { Motorista } from "../../models/Motorista"; 
+import { OrdemJoinha } from "../../models/OrdemJoinha"; 
+import { Banimento } from "../../models/Banimento"; 
+import { IdentificadorLista } from "../../interfaces/ITipos"; 
+import MotoristaService from "../MotoristaService"; 
 
-export class RegistroService {
-    private readonly ordemRepositorio = AppDataSource.getRepository(OrdemJoinha);
-    private readonly listaRepositorio = AppDataSource.getRepository(ListaJoia);
-    private readonly banimentoRepositorio = AppDataSource.getRepository(Banimento);
+export class RegistroService { 
+  private readonly ordemRepositorio = AppDataSource.getRepository(OrdemJoinha); 
+  private readonly listaRepositorio = AppDataSource.getRepository(ListaJoia); 
+  private readonly banimentoRepositorio = AppDataSource.getRepository(Banimento); 
 
-    private async obterNumeroReal(whatsappId: string, client: Client): Promise<string> {
-        try {
-            const contato = await client.getContactById(whatsappId);
-            if (contato.number && !contato.number.includes('@')) {
-                return contato.number.replace(/\D/g, '');
-            }
-            const chat = await client.getChatById(whatsappId);
-            if (chat.id.user && !chat.id.user.includes('lid')) {
-                return chat.id.user.replace(/\D/g, '');
-            }
-            return whatsappId.split('@')[0].split(':')[0].replace(/\D/g, '');
-        } catch (error) {
-            return whatsappId.split('@')[0].split(':')[0].replace(/\D/g, '');
-        }
+  /**
+   * Busca todos os motoristas que foram penalizados (queimaram a largada) in uma lista específica.
+   */
+  public async buscarMotoristasPenalizados(listaId: number): Promise<Motorista[]> { 
+    const registros = await this.ordemRepositorio.find({ 
+      where: { listaJoia: { id: listaId }, isPenalizado: true }, 
+      relations: ["motorista"], 
+      order: { horaDoJoinha: "ASC" } 
+    }); 
+    return registros.map(reg => reg.motorista); 
+  } 
+
+  /**
+   * LIMPAR LISTA: Remove todos os joinhas de uma lista específica
+   */
+  public async limparLista(listaId: number): Promise<void> { 
+    await this.buscarListaOuFalhar(listaId); 
+    await this.ordemRepositorio.delete({ listaJoia: { id: listaId } }); 
+    console.log(`[SERVICE] Fila da lista ${listaId} foi zerada.`); 
+  } 
+
+  /** 
+   * Registro Normal (Janela Oficial) com tratamento anti-concorrência de milissegundos
+   */ 
+  async adicionarJoinha(whatsappId: string, listaId: number, client: any, timestampOficialWhatsApp?: number): Promise<OrdemJoinha> { 
+    const lidLimpo = whatsappId.replace(/:[0-9]+/, '');
+    const motorista = await this.buscarMotoristaAtivoOuFalhar(lidLimpo); 
+    const listaAtiva = await this.buscarListaOuFalhar(listaId); 
+    const dataDefinida = timestampOficialWhatsApp ? new Date(timestampOficialWhatsApp) : new Date();
+
+    try {
+      await this.ordemRepositorio
+        .createQueryBuilder()
+        .insert()
+        .into(OrdemJoinha)
+        .values({
+          posicao: 1, 
+          isPenalizado: false, 
+          motorista: motorista, 
+          listaJoia: listaAtiva, 
+          horaDoJoinha: dataDefinida 
+        })
+        .orUpdate(["horaDoJoinha", "isPenalizado"], ["motorista", "listaJoia"])
+        .execute();
+
+      return await this.ordemRepositorio.findOneOrFail({
+        where: { motorista: { id: motorista.id }, listaJoia: { id: listaAtiva.id } }
+      });
+    } catch (error) {
+      console.error("[ERRO CONCORRÊNCIA ADICIONAR JOINHA]", error);
+      throw error;
     }
+  } 
 
-        /**
-         * Registro Normal (Janela das 20h00)
-         */
-        async adicionarJoinha(whatsappId: string, listaId: number, client: Client): Promise<OrdemJoinha> {
-        const telefone = await this.obterNumeroReal(whatsappId, client);
-        const motorista = await this.buscarMotoristaAtivoOuFalhar(telefone);
-        
-        // Aqui garantimos que ele entre na "Lista Específica" do dia
-        const listaAtiva = await this.buscarListaOuFailhar(listaId);
+  /** 
+   * Registro de Penalidade (Queimou a largada) com tratamento anti-concorrência
+   */ 
+  async adicionarJoinhaPenalizado(whatsappId: string, listaId: number, client: any, timestampOficialWhatsApp?: number): Promise<OrdemJoinha> { 
+    const lidLimpo = whatsappId.replace(/:[0-9]+/, '');
+    const motorista = await this.buscarMotoristaAtivoOuFalhar(lidLimpo); 
+    const listaAtiva = await this.buscarListaOuFalhar(listaId); 
+    const dataDefinida = timestampOficialWhatsApp ? new Date(timestampOficialWhatsApp) : new Date();
 
-        await this.verificarDuplicidadeNaLista(motorista.id, listaId);
+    try {
+      await this.ordemRepositorio
+        .createQueryBuilder()
+        .insert()
+        .into(OrdemJoinha)
+        .values({
+          posicao: 1, 
+          isPenalizado: true, 
+          motorista: motorista, 
+          listaJoia: listaAtiva, 
+          horaDoJoinha: dataDefinida 
+        })
+        .orUpdate(["horaDoJoinha", "isPenalizado"], ["motorista", "listaJoia"])
+        .execute();
 
-        const novoJoinha = this.ordemRepositorio.create({
-            posicao: 1, 
-            isPenalizado: false,
-            motorista: motorista,
-            listaJoia: listaAtiva, // Aqui ele é "guardado" na lista correta
-            horaDoJoinha: new Date() // O carimbo do evento
-        });
-
-        return await this.ordemRepositorio.save(novoJoinha);
+      return await this.ordemRepositorio.findOneOrFail({
+        where: { motorista: { id: motorista.id }, listaJoia: { id: listaAtiva.id } }
+      });
+    } catch (error) {
+      console.error("[ERRO CONCORRÊNCIA ADICIONAR PENALIZADO]", error);
+      throw error;
     }
+  } 
 
+  /** 
+   * Registra um banimento para quem enviou mensagem de texto na janela proibida 
+   */ 
+  async registrarBanimentoAntecipado(whatsappId: string, client: any): Promise<void> { 
+    const lidLimpo = whatsappId.replace(/:[0-9]+/, '');
+    const hoje = this.obterDataHoje(); 
+    const motorista = await MotoristaService.buscarPorLid(lidLimpo); 
+    if (!motorista) return; 
 
-        /**
-     * Registro de Penalidade (Janela 19:57 - 19:59)
-     * Usa o campo isPenalizado do banco para controle
-     */
-    async adicionarJoinhaPenalizado(whatsappId: string, listaId: number, client: Client): Promise<OrdemJoinha> {
-        const telefone = await this.obterNumeroReal(whatsappId, client);
-        const hoje = this.obterDataHoje();
-        const motorista = await this.buscarMotoristaAtivoOuFalhar(telefone);
-        
-        await this.verificarBanimento(motorista.id, hoje);
-        const listaAtiva = await this.buscarListaOuFailhar(listaId);
-        await this.verificarDuplicidadeNaLista(motorista.id, listaId);
+    const jaBanido = await this.banimentoRepositorio.findOneBy({ 
+      motorista: { id: motorista.id }, 
+      dia: hoje 
+    }); 
 
-        const novoJoinha = this.ordemRepositorio.create({
-            posicao: 1,           // Mantemos 1 para não quebrar lógicas de contagem
-            isPenalizado: true,      // <--- AQUI: Ativando a flag da sua tabela
-            motorista: motorista,
-            listaJoia: listaAtiva,
-        });
+    if (!jaBanido) {
+      const novoBan = this.banimentoRepositorio.create({ 
+        dia: hoje, 
+        motorista: motorista, 
+        motivo: "Mensagem enviada na janela de banimento (Queimou a largada)" 
+      }); 
+      await this.banimentoRepositorio.save(novoBan); 
+    } 
+  } 
+  /** 
+   * Busca ou cria a lista para a data atual 
+   */ 
+  async buscarOuCriarListaDoDia(identificador: IdentificadorLista = 'CAPTURA_DIARIA', dataAlvo?: Date): Promise<ListaJoia> { 
+    const dataBusca = dataAlvo ? this.formatarDataParaMeiaNoite(dataAlvo) : this.obterDataHoje(); 
+    let lista = await this.listaRepositorio.findOneBy({ dia: dataBusca }); 
 
-        return await this.ordemRepositorio.save(novoJoinha);
+    if (!lista) { 
+      lista = this.listaRepositorio.create({ dia: dataBusca, identificador }); 
+      try { 
+        await this.listaRepositorio.save(lista); 
+      } catch (error) { 
+        lista = await this.listaRepositorio.findOneBy({ dia: dataBusca }) as ListaJoia; 
+      } 
+    } 
+    return lista; 
+  } 
+
+  /** 
+   * Adiciona um motorista manualmente na lista via LID
+   */ 
+  public async adicionarMotoristaManualmente(whatsappId: string, listaId: number, client: any): Promise<OrdemJoinha> { 
+    const lidLimpo = whatsappId.replace(/:[0-9]+/, '');
+    const motorista = await MotoristaService.buscarPorLid(lidLimpo); 
+    if (!motorista || !motorista.ativo) throw new Error("Motorista não encontrado ou inativo."); 
+    
+    const listaAtiva = await this.buscarListaOuFalhar(listaId); 
+
+    await this.ordemRepositorio
+      .createQueryBuilder()
+      .insert()
+      .into(OrdemJoinha)
+      .values({ 
+        posicao: 1, 
+        isPenalizado: false, 
+        motorista: motorista, 
+        listaJoia: listaAtiva, 
+        horaDoJoinha: new Date() 
+      })
+      .orUpdate(["horaDoJoinha", "isPenalizado"], ["motorista", "listaJoia"])
+      .execute();
+
+    return await this.ordemRepositorio.findOneOrFail({
+      where: { motorista: { id: motorista.id }, listaJoia: { id: listaId } }
+    });
+  } 
+
+  /** 
+   * Remove um motorista de uma lista específica via LID
+   */ 
+  async removerMotoristaDaLista(whatsappId: string, listaId: number, client: any): Promise<void> { 
+    const lidLimpo = whatsappId.replace(/:[0-9]+/, '');
+    const motorista = await MotoristaService.buscarPorLid(lidLimpo); 
+    if (!motorista) throw new Error("Motorista não cadastrado."); 
+    await this.ordemRepositorio.delete({ motorista: { id: motorista.id }, listaJoia: { id: listaId } }); 
+  } 
+
+  /** 
+   * Insere precisamente o motorista reposicionando os horários milimetricamente para evitar bugs na fila 
+   */ 
+  async inserirEmPosicaoEspecifica(whatsappId: string, listaId: number, posicaoAlvo: number, client: any): Promise<void> { 
+    const lidLimpo = whatsappId.replace(/:[0-9]+/, '');
+    const motorista = await MotoristaService.buscarPorLid(lidLimpo); 
+    if (!motorista) throw new Error("Motorista não cadastrado."); 
+
+    const listaAtual = await this.ordemRepositorio.find({ 
+      where: { listaJoia: { id: listaId } }, 
+      order: { isPenalizado: "ASC", horaDoJoinha: "ASC" }, 
+      relations: ["motorista"] 
+    }); 
+
+    const listaFiltrada = listaAtual.filter(item => item.motorista.id !== motorista.id); 
+    let novoHorario: Date; 
+
+    if (listaFiltrada.length >= posicaoAlvo && posicaoAlvo > 0) { 
+      const referencia = listaFiltrada[posicaoAlvo - 1].horaDoJoinha; 
+      novoHorario = new Date(referencia.getTime() - 1000); 
+    } else { 
+      // ERRO 1 CORRIGIDO: Acessando explicitamente o índice [0] do array filtrado
+      const primeiroDaLista = listaFiltrada[0]; 
+      novoHorario = primeiroDaLista ? new Date(primeiroDaLista.horaDoJoinha.getTime() - 1000) : new Date(); 
+    } 
+
+    let registro = await this.ordemRepositorio.findOneBy({ motorista: { id: motorista.id }, listaJoia: { id: listaId } }); 
+
+    if (registro) { 
+      registro.horaDoJoinha = novoHorario; 
+      registro.isPenalizado = false; 
+    } else { 
+      registro = this.ordemRepositorio.create({ posicao: 1, isPenalizado: false, motorista, listaJoia: { id: listaId }, horaDoJoinha: novoHorario }); 
+    } 
+    await this.ordemRepositorio.save(registro); 
+  }
+
+  /**
+   * CADASTRO HÍBRIDO: Preserva o número de telefone isolando-o e mapeia o LID.
+   */
+  async cadastrarMotorista(nome: string, whatsAppId: string, client: any): Promise<Motorista> { 
+    const lidLimpo = whatsAppId.replace(/:[0-9]+/, '');
+    const partesJid = lidLimpo.split('@');
+    // ERRO 2 CORRIGIDO: Coleta o índice [0] antes de aplicar o .replace() de RegExp
+    const idNumerico = partesJid[0].replace(/\D/g, '');
+    
+    return await MotoristaService.cadastrarMotorista({ 
+      nome, 
+      telefoneWhatsApp: idNumerico, 
+      ativo: true,
+      whatsAppLid: lidLimpo
+    }); 
+  } 
+
+  /**
+   * Verifica dinamicamente no banco se o telefone traduzido pertence a um administrador
+   */
+  async verificarSeEhAdmin(whatsappId: string, client: any): Promise<boolean> { 
+    if (!whatsappId) return false;
+
+    const jidLimpo = whatsappId.replace(/:[0-9]+/, '');
+    const partesJid = jidLimpo.split('@');
+    // ERRO 3 CORRIGIDO: Coleta o índice [0] antes de aplicar o .replace() de RegExp
+    let telefone = partesJid[0].replace(/\D/g, '');
+
+    if (telefone === '203998179098859') {
+      telefone = '554497328923';
     }
+    
+    const admin = await AppDataSource.getRepository(require("../../models/Administrador").Administrador).findOneBy({
+      telefoneWhatsApp: telefone
+    });
 
+    return !!admin;
+  }
 
-    async registrarBanimentoAntecipado(whatsappId: string, client: Client): Promise<void> {
-        const telefone = await this.obterNumeroReal(whatsappId, client);
-        const hoje = this.obterDataHoje();
-        const motorista = await MotoristaService.buscarPorTelefone(telefone);
-        if (!motorista) return;
+  public async obterNumeroReal(whatsappId: string, client: any): Promise<string> { 
+    try {
+      if (!whatsappId) return "";
 
-        const jaBanido = await this.banimentoRepositorio.findOneBy({ motorista: { id: motorista.id }, dia: hoje });
-        if (!jaBanido) {
-            const novoBan = this.banimentoRepositorio.create({ 
-                dia: hoje, 
-                motorista: motorista, 
-                motivo: "Mensagem enviada antes das 20h00 (Janela proibida 19:57-19:59)" 
-            });
-            await this.banimentoRepositorio.save(novoBan);
-            }
-        }
+      const jidLimpo = whatsappId.replace(/:[0-9]+/, '');
+      const partesJid = jidLimpo.split('@');
+      // ERRO 4 CORRIGIDO: Coleta o índice [0] antes de aplicar o .replace() de RegExp
+      const idNumerico = partesJid[0].replace(/\D/g, '');
 
-        async buscarOuCriarListaDoDia(
-        identificador: IdentificadorLista = 'CAPTURA_DIARIA', 
-        dataAlvo?: Date // Adicionado parâmetro opcional
-    ): Promise<ListaJoia> {
-        // Se dataAlvo existir, usa ela. Se não, usa a data de agora.
-        const dataBusca = dataAlvo ? this.formatarDataParaMeiaNoite(dataAlvo) : this.obterDataHoje();
-        
-        let lista = await this.listaRepositorio.findOneBy({ dia: dataBusca });
-        
-        if (!lista) {
-            lista = this.listaRepositorio.create({ dia: dataBusca, identificador });
-            await this.listaRepositorio.save(lista);
-        }
-        return lista;
+      if (idNumerico === '203998179098859') {
+        return '554497328923';
+      }
+
+      return idNumerico;
+    } catch (error) { 
+      console.error("[ERRO OBTER NUMERO REAL]", error);
+      const partesJid = whatsappId.split('@');
+      // ERRO 5 CORRIGIDO: Coleta o índice [0] antes de aplicar o .replace() de RegExp
+      return partesJid[0].replace(/\D/g, ''); 
+    } 
+  } 
+
+  private formatarDataParaMeiaNoite(data: Date): Date { 
+    const dataNoFuso = new Date(data.toLocaleString("en-US", { timeZone: "America/Sao_Paulo" }));
+    dataNoFuso.setHours(0, 0, 0, 0);
+    return dataNoFuso; 
+  } 
+
+  private obterDataHoje(): Date { 
+    return this.formatarDataParaMeiaNoite(new Date()); 
+  } 
+
+  private async buscarMotoristaAtivoOuFalhar(whatsAppLid: string): Promise<Motorista> { 
+    const motorista = await MotoristaService.buscarPorLid(whatsAppLid); 
+    if (!motorista || !motorista.ativo) {
+      throw new Error(`Motorista com identificador ${whatsAppLid} não cadastrado ou inativo.`); 
     }
+    return motorista; 
+  } 
 
-    /**
-     * ADICIONAR MANUALMENTE: Coloca o motorista no final da fila atual
-     */
-    public async adicionarMotoristaManualmente(telefone: string, listaId: number): Promise<OrdemJoinha> {
-        const motorista = await MotoristaService.buscarPorTelefone(telefone);
-        if (!motorista) throw new Error("Motorista não cadastrado.");
-        if (!motorista.ativo) throw new Error("Motorista inativo.");
-
-        const listaAtiva = await this.buscarListaOuFailhar(listaId);
-        await this.verificarDuplicidadeNaLista(motorista.id, listaId);
-
-        const novoJoinha = this.ordemRepositorio.create({
-            posicao: 1,
-            isPenalizado: false,
-            motorista: motorista,
-            listaJoia: listaAtiva,
-            horaDoJoinha: new Date() // Final da fila
-        });
-
-        return await this.ordemRepositorio.save(novoJoinha);
-    }
-
-
-        /**
-     * REMOVER: Deleta o registro do joinha da lista específica
-     */
-    async removerMotoristaDaLista(telefone: string, listaId: number): Promise<void> {
-        const motorista = await MotoristaService.buscarPorTelefone(telefone);
-        if (!motorista) throw new Error("Motorista não cadastrado.");
-        await this.ordemRepositorio.delete({ motorista: { id: motorista.id }, listaJoia: { id: listaId } });
-    }
-
-    /**
-     * INSERIR POSIÇÃO ESPECÍFICA: Recalcula a ordem baseada no tempo
-     */
-    async inserirEmPosicaoEspecifica(telefone: string, listaId: number, posicaoAlvo: number): Promise<void> {
-        const motorista = await MotoristaService.buscarPorTelefone(telefone);
-        if (!motorista) throw new Error("Motorista não cadastrado.");
-
-        // 1. Pega a lista atual ordenada
-        const listaAtual = await this.ordemRepositorio.find({
-            where: { listaJoia: { id: listaId } },
-            order: { isPenalizado: "ASC", horaDoJoinha: "ASC" },
-            relations: ["motorista"]
-        });
-
-        // 2. Remove o motorista se ele já estiver na lista (para reordenar)
-        const listaFiltrada = listaAtual.filter(item => item.motorista.id !== motorista.id);
-
-        // 3. Define o horário de referência (baseado no registro que está na posição alvo)
-        // Se a lista estiver vazia ou a posição for maior que a lista, vai para o fim.
-        let novoHorario: Date;
-        if (listaFiltrada.length >= posicaoAlvo) {
-            // Pega o horário de quem está atualmente na posição e subtrai 1 segundo
-            const referencia = listaFiltrada[posicaoAlvo - 1].horaDoJoinha;
-            novoHorario = new Date(referencia.getTime() - 1000); 
-        } else {
-            novoHorario = new Date();
-        }
-
-        // 4. Salva ou atualiza o registro
-        let registro = await this.ordemRepositorio.findOneBy({ motorista: { id: motorista.id }, listaJoia: { id: listaId } });
-        
-        if (registro) {
-            registro.horaDoJoinha = novoHorario;
-            registro.isPenalizado = false;
-        } else {
-            registro = this.ordemRepositorio.create({
-                posicao: 1,
-                isPenalizado: false,
-                motorista,
-                listaJoia: { id: listaId },
-                horaDoJoinha: novoHorario
-            });
-        }
-        await this.ordemRepositorio.save(registro);
-    }
-
-
-    // Método auxiliar para garantir que qualquer data enviada vire "meia-noite"
-    private formatarDataParaMeiaNoite(data: Date): Date {
-        const novaData = new Date(data);
-        novaData.setHours(0, 0, 0, 0);
-        return novaData;
-    }
-
-    async verificarSeEhAdmin(whatsappId: string, client: Client): Promise<boolean> {
-        const telefone = await this.obterNumeroReal(whatsappId, client);
-        const administradores = await AdministradorService.listarAdministradores();
-        return administradores.some(admin => admin.telefoneWhatsApp === telefone);
-    }
-
-    async cadastrarMotorista(nome: string, whatsAppId: string, client: Client): Promise<Motorista> {
-        const telefoneReal = await this.obterNumeroReal(whatsAppId, client);
-        return await MotoristaService.cadastrarMotorista({ nome, telefoneWhatsApp: telefoneReal, ativo: true });
-    }
-
-    private obterDataHoje(): Date {
-        const data = new Date();
-        data.setHours(0, 0, 0, 0);
-        return data;
-    }
-
-    private async buscarMotoristaAtivoOuFalhar(telefone: string): Promise<Motorista> {
-        const motorista = await MotoristaService.buscarPorTelefone(telefone);
-        if (!motorista || !motorista.ativo) {
-            throw new Error("Motorista não cadastrado ou inativo.");
-        }
-        return motorista;
-    }
-
-    private async buscarListaOuFailhar(id: number): Promise<ListaJoia> {
-        const lista = await this.listaRepositorio.findOneBy({ id });
-        if (!lista) throw new Error("Não há nenhuma lista aberta para este ID.");
-        return lista;
-    }
-
-    private async verificarBanimento(motoristaId: number, data: Date): Promise<void> {
-        const banido = await this.banimentoRepositorio.findOneBy({ motorista: { id: motoristaId }, dia: data });
-        if (banido) {
-            throw new Error(`JOIA BLOQUEADO! 🚫\nMotivo: ${banido.motivo}\nSua participação está bloqueada hoje.`);
-        }
-    }
-
-    private async verificarDuplicidadeNaLista(motoristaId: number, listaId: number): Promise<void> {
-        const existe = await this.ordemRepositorio.findOneBy({ motorista: { id: motoristaId }, listaJoia: { id: listaId } });
-        if (existe) throw new Error("Você já está nesta lista!");
-    }
+  private async buscarListaOuFalhar(id: number): Promise<ListaJoia> { 
+    const lista = await this.listaRepositorio.findOneBy({ id }); 
+    if (!lista) throw new Error("Lista não encontrada."); 
+    return lista; 
+  } 
 }

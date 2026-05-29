@@ -1,11 +1,11 @@
-import { AppDataSource } from "../../data-source";
-import { Administrador } from "../../models/Administrador";
-import NaoEncontradoErro from "../../error/NaoEncontrado.404";
-import IAdministrador from "../../interfaces/IAdministrador";
-import validarCamposObrigatorios from "../../utils/helpers/VerificarCamposObrigatorios";
-import RequisicaoInvalidaErro from "../../error/RequisicaoInvalida.400";
-import CpfValido from "../../utils/validators/ValidacaoDeCpf";
-import VerificarDuplicidade from "../../utils/helpers/VerificarDuplicidade";
+import { AppDataSource } from "../data-source";
+import { Administrador } from "../models/Administrador";
+import NaoEncontradoErro from "../error/NaoEncontrado.404";
+import RequisicaoInvalidaErro from "../error/RequisicaoInvalida.400";
+import IAdministrador from "../interfaces/IAdministrador";
+import validarCamposObrigatorios from "../utils/helpers/VerificarCamposObrigatorios";
+import VerificarDuplicidade from "../utils/helpers/VerificarDuplicidade";
+import CpfValido from "../utils/validators/ValidacaoDeCpf";
 
 class AdministradorService {
     private static administradorRepositorio = AppDataSource.getRepository(Administrador);

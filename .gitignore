@@ -146,3 +146,5 @@ vite.config.ts.timestamp-*
 .wwebjs_auth/
 .wwebjs_cache/
 data-source.ts
+sessao_whatsapp_socket
+evolution-api

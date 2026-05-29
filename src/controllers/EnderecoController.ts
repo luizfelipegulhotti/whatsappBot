@@ -1,5 +1,5 @@
 import { Request, Response } from "express";
-import EnderecoService from "../service/endereco/EndereçoService";
+import EnderecoService from "../service/EndereçoService";
 
 class EnderecoController {
 

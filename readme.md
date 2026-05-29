@@ -123,8 +123,11 @@ O [Supertest:] Essencial para testar rotas (as requisições HTTP).
 `npm install node-cron`
 `npm install --save-dev @types/node-cron`
 
+**Instalação do [Multer]**
+`npm install multer`
+`npm install -D @types/multer`
+
 **Tamanho padrão das imagens: [157x250]**
 
-**Instalação do WhatsappWeb.js**
-`npm install whatsapp-web.js qrcode-terminal`
-`npm install --save-dev @types/qrcode-terminal`
+**Instalação do Baileys para o WhatsApp**
+`npm install @whiskeysockets/baileys @hapi/boom`

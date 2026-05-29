@@ -1,5 +1,5 @@
 import { Request, Response } from "express";
-import AdministradorService from "../service/administrador/AdministradorService";
+import AdministradorService from "../service/AdministradorService";
 
 class AdministradorController {
 
