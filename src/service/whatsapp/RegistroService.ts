@@ -5,6 +5,8 @@ import { OrdemJoinha } from "../../models/OrdemJoinha";
 import { Banimento } from "../../models/Banimento"; 
 import { IdentificadorLista } from "../../interfaces/ITipos"; 
 import MotoristaService from "../MotoristaService"; 
+import { jidNormalizedUser, WASocket } from "@whiskeysockets/baileys";
+import { Between } from "typeorm";
 
 export class RegistroService { 
   private readonly ordemRepositorio = AppDataSource.getRepository(OrdemJoinha); 
@@ -12,7 +14,7 @@ export class RegistroService {
   private readonly banimentoRepositorio = AppDataSource.getRepository(Banimento); 
 
   /**
-   * Busca todos os motoristas que foram penalizados (queimaram a largada) in uma lista específica.
+   * Busca todos os motoristas que foram penalizados (queimaram a largada) em uma lista específica.
    */
   public async buscarMotoristasPenalizados(listaId: number): Promise<Motorista[]> { 
     const registros = await this.ordemRepositorio.find({ 
@@ -33,13 +35,12 @@ export class RegistroService {
   } 
 
   /** 
-   * Registro Normal (Janela Oficial) com tratamento anti-concorrência de milissegundos
+   * Registro Normal (Janela Oficial) com tratamento anti-concorrência estrito
    */ 
-  async adicionarJoinha(whatsappId: string, listaId: number, client: any, timestampOficialWhatsApp?: number): Promise<OrdemJoinha> { 
+  async adicionarJoinha(whatsappId: string, listaId: number, client: WASocket, timestampOficialWhatsApp?: number): Promise<OrdemJoinha> { 
     const lidLimpo = whatsappId.replace(/:[0-9]+/, '');
     const motorista = await this.buscarMotoristaAtivoOuFalhar(lidLimpo); 
     const listaAtiva = await this.buscarListaOuFalhar(listaId); 
-    const dataDefinida = timestampOficialWhatsApp ? new Date(timestampOficialWhatsApp) : new Date();
 
     try {
       await this.ordemRepositorio
@@ -49,15 +50,16 @@ export class RegistroService {
         .values({
           posicao: 1, 
           isPenalizado: false, 
-          motorista: motorista, 
-          listaJoia: listaAtiva, 
-          horaDoJoinha: dataDefinida 
+          motoristaId: motorista.id, // 🏅 CORREÇÃO: Passa o ID numérico estrito da coluna
+          listaJoiaId: listaAtiva.id, // 🏅 CORREÇÃO: Passa o ID numérico estrito da coluna
+          horaDoJoinha: () => "NOW(6)" 
         })
-        .orUpdate(["horaDoJoinha", "isPenalizado"], ["motorista", "listaJoia"])
+        // Força a restrição apontando para os nomes das colunas físicas exatas do MySQL
+        .orUpdate(["horaDoJoinha", "isPenalizado"], ["motoristaId", "listaJoiaId"])
         .execute();
 
       return await this.ordemRepositorio.findOneOrFail({
-        where: { motorista: { id: motorista.id }, listaJoia: { id: listaAtiva.id } }
+        where: { motoristaId: motorista.id, listaJoiaId: listaAtiva.id }
       });
     } catch (error) {
       console.error("[ERRO CONCORRÊNCIA ADICIONAR JOINHA]", error);
@@ -66,13 +68,12 @@ export class RegistroService {
   } 
 
   /** 
-   * Registro de Penalidade (Queimou a largada) com tratamento anti-concorrência
+   * Registro de Penalidade (Queimou a largada) com microssegundos nativos do banco
    */ 
-  async adicionarJoinhaPenalizado(whatsappId: string, listaId: number, client: any, timestampOficialWhatsApp?: number): Promise<OrdemJoinha> { 
+  async adicionarJoinhaPenalizado(whatsappId: string, listaId: number, client: WASocket, timestampOficialWhatsApp?: number): Promise<OrdemJoinha> { 
     const lidLimpo = whatsappId.replace(/:[0-9]+/, '');
     const motorista = await this.buscarMotoristaAtivoOuFalhar(lidLimpo); 
     const listaAtiva = await this.buscarListaOuFalhar(listaId); 
-    const dataDefinida = timestampOficialWhatsApp ? new Date(timestampOficialWhatsApp) : new Date();
 
     try {
       await this.ordemRepositorio
@@ -82,26 +83,27 @@ export class RegistroService {
         .values({
           posicao: 1, 
           isPenalizado: true, 
-          motorista: motorista, 
-          listaJoia: listaAtiva, 
-          horaDoJoinha: dataDefinida 
+          motoristaId: motorista.id, // 🏅 CORREÇÃO: Passa o ID numérico estrito da coluna
+          listaJoiaId: listaAtiva.id, // 🏅 CORREÇÃO: Passa o ID numérico estrito da coluna
+          horaDoJoinha: () => "NOW(6)" 
         })
-        .orUpdate(["horaDoJoinha", "isPenalizado"], ["motorista", "listaJoia"])
+        .orUpdate(["horaDoJoinha", "isPenalizado"], ["motoristaId", "listaJoiaId"])
         .execute();
 
       return await this.ordemRepositorio.findOneOrFail({
-        where: { motorista: { id: motorista.id }, listaJoia: { id: listaAtiva.id } }
+        where: { motoristaId: motorista.id, listaJoiaId: listaAtiva.id }
       });
     } catch (error) {
       console.error("[ERRO CONCORRÊNCIA ADICIONAR PENALIZADO]", error);
       throw error;
     }
-  } 
+  }
 
   /** 
    * Registra um banimento para quem enviou mensagem de texto na janela proibida 
+   * ESTE MÉTODO ESTÁ 100% CORRETO E PRONTO
    */ 
-  async registrarBanimentoAntecipado(whatsappId: string, client: any): Promise<void> { 
+  async registrarBanimentoAntecipado(whatsappId: string, client: WASocket): Promise<void> { 
     const lidLimpo = whatsappId.replace(/:[0-9]+/, '');
     const hoje = this.obterDataHoje(); 
     const motorista = await MotoristaService.buscarPorLid(lidLimpo); 
@@ -121,6 +123,7 @@ export class RegistroService {
       await this.banimentoRepositorio.save(novoBan); 
     } 
   } 
+
   /** 
    * Busca ou cria a lista para a data atual 
    */ 
@@ -142,86 +145,221 @@ export class RegistroService {
   /** 
    * Adiciona um motorista manualmente na lista via LID
    */ 
-  public async adicionarMotoristaManualmente(whatsappId: string, listaId: number, client: any): Promise<OrdemJoinha> { 
-    const lidLimpo = whatsappId.replace(/:[0-9]+/, '');
+  public async adicionarMotoristaManualmente(whatsappId: string, listaId: number, client: WASocket): Promise<OrdemJoinha> { 
+      const lidLimpo = whatsappId.replace(/:[0-9]+/, '').split('@')[0];
+      const motorista = await MotoristaService.buscarPorLid(lidLimpo); 
+      if (!motorista || !motorista.ativo) throw new Error("Motorista não encontrado ou inativo."); 
+      
+      const listaAtiva = await this.buscarListaOuFalhar(listaId); 
+
+      let registro = await this.ordemRepositorio.findOne({
+        where: { motoristaId: motorista.id, listaJoiaId: listaId }
+      });
+
+      if (!registro) {
+        const ultimaOrdem = await this.ordemRepositorio.findOne({
+          where: { listaJoiaId: listaId },
+          order: { posicaoEfetiva: 'DESC' }
+        });
+        
+        const proximaPosicao = ultimaOrdem && ultimaOrdem.posicaoEfetiva ? ultimaOrdem.posicaoEfetiva + 1 : 1;
+
+        registro = this.ordemRepositorio.create({
+          motoristaId: motorista.id,
+          listaJoiaId: listaId,
+          posicao: proximaPosicao, // Sincroniza a coluna antiga
+          posicaoEfetiva: proximaPosicao,
+          isPenalizado: false,
+          horaDoJoinha: new Date()
+        });
+      } else {
+        registro.isPenalizado = false;
+        registro.horaDoJoinha = new Date();
+      }
+
+      const salvo = await this.ordemRepositorio.save(registro);
+
+      // 🔥 GATILHO: Dispara o recálculo automático das rotas para esta lista
+      await this.sincronizarAtribuicoesFinais(listaId, listaAtiva.dia);
+
+      return salvo;
+  }
+  
+    /**
+   * Insere um motorista cadastrado exatamente na posição alvo.
+   * ACEITA ESTRITAMENTE: 'dataLista: Date' para manter compatibilidade total com o bot.
+   */
+  async inserirEmPosicaoEspecifica(whatsappId: string, dataLista: Date, posicaoAlvo: number): Promise<void> {
+    const lidLimpo = whatsappId.replace(/:[0-9]+/, '').split('@')[0];
     const motorista = await MotoristaService.buscarPorLid(lidLimpo); 
-    if (!motorista || !motorista.ativo) throw new Error("Motorista não encontrado ou inativo."); 
-    
-    const listaAtiva = await this.buscarListaOuFalhar(listaId); 
+    if (!motorista) throw new Error("Motorista não cadastrado."); 
 
-    await this.ordemRepositorio
-      .createQueryBuilder()
-      .insert()
-      .into(OrdemJoinha)
-      .values({ 
-        posicao: 1, 
-        isPenalizado: false, 
-        motorista: motorista, 
-        listaJoia: listaAtiva, 
-        horaDoJoinha: new Date() 
-      })
-      .orUpdate(["horaDoJoinha", "isPenalizado"], ["motorista", "listaJoia"])
-      .execute();
+    // Define o intervalo de segurança para capturar a lista correta do fuso
+    const inicioDia = new Date(dataLista);
+    inicioDia.setHours(0, 0, 0, 0);
+    const fimDia = new Date(dataLista);
+    fimDia.setHours(23, 59, 59, 999);
 
-    return await this.ordemRepositorio.findOneOrFail({
-      where: { motorista: { id: motorista.id }, listaJoia: { id: listaId } }
+    const listaDoDia = await this.listaRepositorio.findOne({
+      where: { dia: Between(inicioDia, fimDia) }
     });
-  } 
+
+    if (!listaDoDia) {
+      throw new Error("Não foi encontrada nenhuma lista criada para o dia informado.");
+    }
+
+    // Calcula os metadados do calendário para obter a vaga congelada do Apoio
+    const meta = await require("../../utils/helpers/CalcularMetaConfiguracao").default(listaDoDia.dia);
+    const posicaoApoioFixa = meta.tipoDia === 'DIA_COMUM' ? meta.qtdMaxRotasValidas + 1 : -1;
+
+    const listaAtual = await this.ordemRepositorio.find({
+      where: { listaJoia: { id: listaDoDia.id } },
+      relations: ["motorista", "listaJoia"],
+      order: { isPenalizado: 'ASC', posicaoEfetiva: 'ASC', horaDoJoinha: 'ASC' }
+    });
+
+    const listaFiltrada = listaAtual.filter(item => item.motorista?.id !== motorista.id);
+
+    let registroMotorista = listaAtual.find(item => item.motorista?.id === motorista.id);
+    if (!registroMotorista) {
+      registroMotorista = this.ordemRepositorio.create({
+        motorista: motorista,
+        listaJoia: listaDoDia,
+        posicao: 1,
+        isPenalizado: false
+      });
+    }
+
+    const indiceAlvo = Math.max(0, posicaoAlvo - 1);
+    listaFiltrada.splice(indiceAlvo, 0, registroMotorista);
+
+    let contadorPosicao = 1;
+    for (let i = 0; i < listaFiltrada.length; i++) {
+      // 🔒 TRAVA DO APOIO: Se o contador atingir a vaga do Apoio, pula ela para mantê-lo congelado
+      if (contadorPosicao === posicaoApoioFixa) {
+        contadorPosicao++;
+      }
+
+      // Se for o motorista de Apoio (e a ação não for mover o próprio Apoio), mantém a posição estática
+      if (listaFiltrada[i].posicaoEfetiva === posicaoApoioFixa && posicaoAlvo !== posicaoApoioFixa) {
+        continue;
+      }
+
+      listaFiltrada[i].posicaoEfetiva = contadorPosicao;
+      listaFiltrada[i].posicao = contadorPosicao;
+      contadorPosicao++;
+    }
+
+    await this.ordemRepositorio.save(listaFiltrada);
+    
+    // Instanciação dinâmica que quebra a dependência circular e executa na hora
+    const { EscalaService } = require("./EscalaService");
+    const escalaServiceNativo = new EscalaService();
+    await escalaServiceNativo.gerarEscalaCompleta(listaDoDia.id);
+  }
 
   /** 
-   * Remove um motorista de uma lista específica via LID
+   * Remove um motorista da lista baseado na data e reorganiza as posições sem mexer no Apoio
    */ 
-  async removerMotoristaDaLista(whatsappId: string, listaId: number, client: any): Promise<void> { 
-    const lidLimpo = whatsappId.replace(/:[0-9]+/, '');
+  public async removerMotoristaDaLista(whatsappId: string, dataLista: Date): Promise<void> { 
+    const lidLimpo = whatsappId.replace(/:[0-9]+/, '').split('@')[0];
     const motorista = await MotoristaService.buscarPorLid(lidLimpo); 
     if (!motorista) throw new Error("Motorista não cadastrado."); 
-    await this.ordemRepositorio.delete({ motorista: { id: motorista.id }, listaJoia: { id: listaId } }); 
-  } 
+    
+    const inicioDia = new Date(dataLista);
+    inicioDia.setHours(0, 0, 0, 0);
+    const fimDia = new Date(dataLista);
+    fimDia.setHours(23, 59, 59, 999);
 
-  /** 
-   * Insere precisamente o motorista reposicionando os horários milimetricamente para evitar bugs na fila 
-   */ 
-  async inserirEmPosicaoEspecifica(whatsappId: string, listaId: number, posicaoAlvo: number, client: any): Promise<void> { 
-    const lidLimpo = whatsappId.replace(/:[0-9]+/, '');
-    const motorista = await MotoristaService.buscarPorLid(lidLimpo); 
-    if (!motorista) throw new Error("Motorista não cadastrado."); 
+    const listaAtiva = await this.listaRepositorio.findOne({
+      where: { dia: Between(inicioDia, fimDia) }
+    });
 
-    const listaAtual = await this.ordemRepositorio.find({ 
-      where: { listaJoia: { id: listaId } }, 
-      order: { isPenalizado: "ASC", horaDoJoinha: "ASC" }, 
-      relations: ["motorista"] 
-    }); 
+    if (!listaAtiva) throw new Error("Lista não encontrada para a data informada.");
+    
+    const filaAtual = await this.ordemRepositorio.find({
+      where: { listaJoia: { id: listaAtiva.id } },
+      relations: ["motorista"],
+      order: { isPenalizado: 'ASC', posicaoEfetiva: 'ASC', horaDoJoinha: 'ASC' }
+    });
 
-    const listaFiltrada = listaAtual.filter(item => item.motorista.id !== motorista.id); 
-    let novoHorario: Date; 
+    const meta = await require("../../utils/helpers/CalcularMetaConfiguracao").default(listaAtiva.dia);
+    const posicaoApoioFixa = meta.tipoDia === 'DIA_COMUM' ? meta.qtdMaxRotasValidas + 1 : -1;
 
-    if (listaFiltrada.length >= posicaoAlvo && posicaoAlvo > 0) { 
-      const referencia = listaFiltrada[posicaoAlvo - 1].horaDoJoinha; 
-      novoHorario = new Date(referencia.getTime() - 1000); 
-    } else { 
-      // ERRO 1 CORRIGIDO: Acessando explicitamente o índice [0] do array filtrado
-      const primeiroDaLista = listaFiltrada[0]; 
-      novoHorario = primeiroDaLista ? new Date(primeiroDaLista.horaDoJoinha.getTime() - 1000) : new Date(); 
-    } 
+    await this.ordemRepositorio.delete({ motorista: { id: motorista.id }, listaJoia: { id: listaAtiva.id } }); 
 
-    let registro = await this.ordemRepositorio.findOneBy({ motorista: { id: motorista.id }, listaJoia: { id: listaId } }); 
+    const filaRestante = filaAtual.filter(item => item.motorista?.id !== motorista.id);
 
-    if (registro) { 
-      registro.horaDoJoinha = novoHorario; 
-      registro.isPenalizado = false; 
-    } else { 
-      registro = this.ordemRepositorio.create({ posicao: 1, isPenalizado: false, motorista, listaJoia: { id: listaId }, horaDoJoinha: novoHorario }); 
-    } 
-    await this.ordemRepositorio.save(registro); 
+    let contadorPosicao = 1;
+    for (let i = 0; i < filaRestante.length; i++) {
+      if (contadorPosicao === posicaoApoioFixa) {
+        contadorPosicao++; 
+      }
+      if (filaRestante[i].posicaoEfetiva === posicaoApoioFixa) {
+        continue;
+      }
+      filaRestante[i].posicaoEfetiva = contadorPosicao;
+      filaRestante[i].posicao = contadorPosicao;
+      contadorPosicao++;
+    }
+
+    await this.ordemRepositorio.save(filaRestante);
+
+    const { EscalaService } = require("./EscalaService");
+    const escalaServiceNativo = new EscalaService();
+    await escalaServiceNativo.gerarEscalaCompleta(listaAtiva.id);
+  }
+
+
+
+  /**
+   * 🔥 NOVO MÉTODO AUXILIAR: Reconstrói os vínculos da tabela 'atribuicao_final' por ordem de chegada
+   */
+  private async sincronizarAtribuicoesFinais(listaJoiaId: number, dataGeracao: Date): Promise<void> {
+      const queryRunner = this.ordemRepositorio.manager;
+
+      // 1. Coleta todas as rotas físicas do turno cadastradas no banco pela ordem de prioridade
+      const rotasCadastradas = await queryRunner.query(
+        "SELECT `id` FROM `rota` ORDER BY `ordem` ASC"
+      );
+
+      // 2. Busca a fila de joinhas já reordenada
+      const filaAtualizada = await this.ordemRepositorio.find({
+        where: { listaJoiaId },
+        order: { isPenalizado: 'ASC', posicaoEfetiva: 'ASC', horaDoJoinha: 'ASC' }
+      });
+
+      // 3. Limpa todas as atribuições engessadas daquela lista para evitar registros duplicados
+      await queryRunner.query(
+        "DELETE FROM `atribuicao_final` WHERE `listaJoiaId` = ?",
+        [listaJoiaId]
+      );
+
+      // 4. Cria os novos vínculos: o 1º da fila pega a 1ª rota, o 2º pega a 2ª rota...
+      for (let i = 0; i < filaAtualizada.length; i++) {
+          const motoristaId = filaAtualizada[i].motoristaId;
+          const rotaId = rotasCadastradas[i] ? rotasCadastradas[i].id : null;
+          
+          // Se houver rota física para a posição, atribui como ROTA, senão vira PLANTAO/BACKUP
+          const tipoAtribuicao = rotaId ? 'ROTA' : 'PLANTAO';
+
+          if (motoristaId) {
+              await queryRunner.query(
+                `INSERT INTO \`atribuicao_final\` 
+                (\`listaJoiaId\`, \`motoristaId\`, \`rotaId\`, \`tipoAtribuicao\`, \`dataGeracao\`) 
+                VALUES (?, ?, ?, ?, ?)`,
+                [listaJoiaId, motoristaId, rotaId, tipoAtribuicao, dataGeracao]
+              );
+          }
+      }
   }
 
   /**
    * CADASTRO HÍBRIDO: Preserva o número de telefone isolando-o e mapeia o LID.
    */
-  async cadastrarMotorista(nome: string, whatsAppId: string, client: any): Promise<Motorista> { 
+  async cadastrarMotorista(nome: string, whatsAppId: string, client: WASocket): Promise<Motorista> { 
     const lidLimpo = whatsAppId.replace(/:[0-9]+/, '');
     const partesJid = lidLimpo.split('@');
-    // ERRO 2 CORRIGIDO: Coleta o índice [0] antes de aplicar o .replace() de RegExp
     const idNumerico = partesJid[0].replace(/\D/g, '');
     
     return await MotoristaService.cadastrarMotorista({ 
@@ -230,62 +368,85 @@ export class RegistroService {
       ativo: true,
       whatsAppLid: lidLimpo
     }); 
-  } 
-
-  /**
-   * Verifica dinamicamente no banco se o telefone traduzido pertence a um administrador
-   */
-  async verificarSeEhAdmin(whatsappId: string, client: any): Promise<boolean> { 
-    if (!whatsappId) return false;
-
-    const jidLimpo = whatsappId.replace(/:[0-9]+/, '');
-    const partesJid = jidLimpo.split('@');
-    // ERRO 3 CORRIGIDO: Coleta o índice [0] antes de aplicar o .replace() de RegExp
-    let telefone = partesJid[0].replace(/\D/g, '');
-
-    if (telefone === '203998179098859') {
-      telefone = '554497328923';
-    }
-    
-    const admin = await AppDataSource.getRepository(require("../../models/Administrador").Administrador).findOneBy({
-      telefoneWhatsApp: telefone
-    });
-
-    return !!admin;
   }
 
-  public async obterNumeroReal(whatsappId: string, client: any): Promise<string> { 
+  async verificarSeEhAdmin(whatsappId: string, client: WASocket): Promise<boolean> { 
+    if (!whatsappId) return false;
+
+    // 1. Isola a string numérica pura, limpando qualquer domínio ou sufixo residual
+    const idNumericoPuro = await this.obterNumeroReal(whatsappId, client);
+    if (!idNumericoPuro) return false;
+
+    const administradorRepositorio = AppDataSource.getRepository(
+      require("../../models/Administrador").Administrador
+    );
+
+    // 2. BUSCA INTELIGENTE EM DOIS PASSOS:
+    // Primeiro passo: Tenta localizar o administrador assumindo que o ID numérico puro recebido seja um LID
+    const adminPorLid = await administradorRepositorio.findOneBy({
+      whatsappLid: idNumericoPuro
+    });
+    if (adminPorLid) return true;
+
+    // Segundo passo (Fallback): Se não achou pelo LID, tenta localizar assumindo que seja o número de telefone
+    const adminPorTelefone = await administradorRepositorio.findOneBy({
+      telefoneWhatsApp: idNumericoPuro
+    });
+
+    return !!adminPorTelefone;
+  }
+
+  /**
+   * Traduz o identificador JID de rede para obter a string numérica pura (LID ou Telefone)
+   */
+  public async obterNumeroReal(whatsappId: string, client: WASocket): Promise<string> { 
     try {
       if (!whatsappId) return "";
 
-      const jidLimpo = whatsappId.replace(/:[0-9]+/, '');
-      const partesJid = jidLimpo.split('@');
-      // ERRO 4 CORRIGIDO: Coleta o índice [0] antes de aplicar o .replace() de RegExp
-      const idNumerico = partesJid[0].replace(/\D/g, '');
-
-      if (idNumerico === '203998179098859') {
-        return '554497328923';
+      // Se a string já vier limpa apenas com os números (ex: repassada via autorLid), retorna ela direto
+      if (!whatsappId.includes('@')) {
+        return whatsappId.replace(/\D/g, '');
       }
 
-      return idNumerico;
+      // Caso contrário, normaliza nativamente e separa o domínio
+      const jidNormalizado = jidNormalizedUser(whatsappId);
+      return jidNormalizado.split('@')[0];
+      
     } catch (error) { 
       console.error("[ERRO OBTER NUMERO REAL]", error);
-      const partesJid = whatsappId.split('@');
-      // ERRO 5 CORRIGIDO: Coleta o índice [0] antes de aplicar o .replace() de RegExp
-      return partesJid[0].replace(/\D/g, ''); 
+      return whatsappId.split('@')[0].replace(/\D/g, ''); 
     } 
-  } 
+  }
 
+  /**
+   * Zera os componentes de tempo (horas, minutos e segundos) forçando o dia correto em Brasília
+   */
   private formatarDataParaMeiaNoite(data: Date): Date { 
-    const dataNoFuso = new Date(data.toLocaleString("en-US", { timeZone: "America/Sao_Paulo" }));
-    dataNoFuso.setHours(0, 0, 0, 0);
-    return dataNoFuso; 
-  } 
+    const formatador = new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/Sao_Paulo",
+      year: "numeric",
+      month: "numeric",
+      day: "numeric"
+    });
+    
+    const partes = formatador.formatToParts(data);
+    const year = Number(partes.find(p => p.type === "year")?.value || 0);
+    const month = Number(partes.find(p => p.type === "month")?.value || 0) - 1;
+    const day = Number(partes.find(p => p.type === "day")?.value || 0);
+    
+    return new Date(year, month, day, 0, 0, 0, 0); 
+  }
 
+  /**
+   * Obtém a data de hoje no fuso horário do Brasil zerada (00:00:00)
+   */
   private obterDataHoje(): Date { 
     return this.formatarDataParaMeiaNoite(new Date()); 
   } 
 
+  /**
+   * Busca um motorista ativo ou interrompe o fluxo disparando uma exceção controlada
+   */
   private async buscarMotoristaAtivoOuFalhar(whatsAppLid: string): Promise<Motorista> { 
     const motorista = await MotoristaService.buscarPorLid(whatsAppLid); 
     if (!motorista || !motorista.ativo) {
@@ -294,6 +455,9 @@ export class RegistroService {
     return motorista; 
   } 
 
+  /**
+   * Busca um registro de lista de joinhas ou dispara um erro caso a entidade não exista
+   */
   private async buscarListaOuFalhar(id: number): Promise<ListaJoia> { 
     const lista = await this.listaRepositorio.findOneBy({ id }); 
     if (!lista) throw new Error("Lista não encontrada."); 

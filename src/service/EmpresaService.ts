@@ -6,6 +6,7 @@ import IEmpresa from "../interfaces/IEmpresa";
 import validarCamposObrigatorios from "../utils/helpers/VerificarCamposObrigatorios";
 import VerificarDuplicidade from "../utils/helpers/VerificarDuplicidade";
 import validarCNPJCompleto from "../utils/validators/ValidacaoDeCnpj";
+import TextoHelper from "../utils/helpers/TextoHelper";
 
 class EmpresaService {
 
@@ -111,6 +112,10 @@ class EmpresaService {
             ['nome', 'cnpj']
         );
 
+        if(dados.nome) {
+            dados.nome = TextoHelper.sanitizarNome(dados.nome);
+        }
+
         if(!validarCNPJCompleto(dados.cnpj)) {
             throw new RequisicaoInvalidaErro('CNPJ inválido!')
         };
@@ -134,6 +139,10 @@ class EmpresaService {
         if(!empresaAtual) {
             throw new NaoEncontradoErro('Empresa não encontrada para a edição!');
         };
+
+        if(dados.nome) {
+            dados.nome = TextoHelper.sanitizarNome(dados.nome);
+        }
 
         if(dados.cnpj && !validarCNPJCompleto(dados.cnpj)) {
             throw new RequisicaoInvalidaErro('O novo CNPJ é inválido!')

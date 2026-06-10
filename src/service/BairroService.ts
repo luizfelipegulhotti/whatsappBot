@@ -7,6 +7,7 @@ import ICidade from "../interfaces/ICidade";
 import CidadeService from "./CidadeService";
 import validarCamposObrigatorios from "../utils/helpers/VerificarCamposObrigatorios";
 import VerificarDuplicidade from "../utils/helpers/VerificarDuplicidade";
+import TextoHelper from "../utils/helpers/TextoHelper";
 
 class BairroService {
     private static bairroRepositorio = AppDataSource.getRepository(Bairro);
@@ -36,6 +37,10 @@ class BairroService {
     // Service para cadastrar bairro:
     static async cadastrarBairro(dados: IBairro): Promise<Bairro> {
         validarCamposObrigatorios<IBairro>(dados, ['nome']);
+
+        if(dados.nome) {
+            dados.nome = TextoHelper.sanitizarNome(dados.nome);
+        }
 
         // 1. Resolvemos a Cidade via Service (Garante o ID e resolve Estado/Pais)
         const cidadeFinal = await CidadeService.cadastrarCidade(dados.cidade as ICidade);
@@ -78,6 +83,10 @@ class BairroService {
             where: { id }, 
             relations: ['cidade', 'cidade.estado'] 
         });
+
+        if(dados.nome) {
+            dados.nome = TextoHelper.sanitizarNome(dados.nome);
+        }
 
         if (!bairroAtual) {
             throw new NaoEncontradoErro('Bairro não encontrado para a edição!');

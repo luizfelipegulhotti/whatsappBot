@@ -16,6 +16,9 @@ export class Administrador {
     @Column({ unique: true, nullable: true })
     telefoneWhatsApp!: string;
 
+    @Column({ unique: true, nullable: true })
+    whatsappLid?: string;
+
     @Column({ unique: true })
     email!: string;
 

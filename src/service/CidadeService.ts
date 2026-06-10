@@ -7,6 +7,7 @@ import IEstado from "../interfaces/IEstado";
 import EstadoService from "./EstadoService"; 
 import validarCamposObrigatorios from "../utils/helpers/VerificarCamposObrigatorios";
 import VerificarDuplicidade from "../utils/helpers/VerificarDuplicidade";
+import TextoHelper from "../utils/helpers/TextoHelper";
 
 class CidadeService {
     private static cidadeRepositorio = AppDataSource.getRepository(Cidade);
@@ -45,11 +46,12 @@ class CidadeService {
     static async cadastrarCidade(dados: ICidade): Promise<Cidade> {
         validarCamposObrigatorios<Cidade>(dados as Cidade, ['nome']);
 
-        // 1. Resolve o Estado chamando o EstadoService (Garante ID e evita duplicação)
+        if(dados.nome) {
+            dados.nome = TextoHelper.sanitizarNome(dados.nome);
+        }
+
         const estadoFinal = await EstadoService.cadastrarEstado(dados.estado as IEstado);
 
-        // 2. BUSCA PREVENTIVA: Tenta encontrar a Cidade exata antes de qualquer ação
-        // Isso impede que o 'VerificarDuplicidade' trave o fluxo de cascata do Passageiro
         const cidadeExistente = await this.cidadeRepositorio.findOne({
             where: { 
                 nome: dados.nome, 
@@ -57,12 +59,10 @@ class CidadeService {
             }
         });
 
-        // Se o registro já existe, retornamos ele com o ID original (evita duplicação)
         if (cidadeExistente) {
             return cidadeExistente;
         }
 
-        // 3. VALIDAÇÃO DE INTEGRIDADE: Se for nova, garantimos que não há conflitos
         await VerificarDuplicidade<Cidade>({
             repositorio: this.cidadeRepositorio,
             dados: { 
@@ -71,7 +71,6 @@ class CidadeService {
             },
         });
 
-        // 4. CRIAÇÃO: Registra a nova Cidade vinculada ao ID do Estado correto
         const novaCidade = this.cidadeRepositorio.create({
             ...dados,
             estado: estadoFinal,
@@ -87,20 +86,21 @@ class CidadeService {
             relations: ['estado', 'estado.pais']
         });
 
+        if(dados.nome) {
+            dados.nome = TextoHelper.sanitizarNome(dados.nome);
+        }
+
         if (!cidadeAtual) {
             throw new NaoEncontradoErro('Cidade não encontrada para a edição!');
         }
 
         let estadoFinal = cidadeAtual.estado;
 
-        // Se o estado foi enviado na edição, resolvemos o ID dele primeiro
+        
         if (dados.estado) {
             estadoFinal = await EstadoService.cadastrarEstado(dados.estado as IEstado);
         }
 
-        // VALIDAÇÃO DE EDIÇÃO SEGURA: 
-        // Passamos o 'idParaIgnorar' (ID da própria Cidade) para que a 
-        // verificação não barre a atualização do próprio registro.
         if (dados.nome || dados.estado) {
             await VerificarDuplicidade<Cidade>({
                 repositorio: this.cidadeRepositorio,

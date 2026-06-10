@@ -18,6 +18,9 @@ export class Motorista {
     @Column( { default: true })
     ativo!: boolean;
 
+    @Column({ type: "boolean", default: false, nullable: true })
+    podeFazerRota?: boolean;
+
     @Column({ type: "timestamp", default: () => "CURRENT_TIMESTAMP" })
     dataDeRegistro!: Date;
 

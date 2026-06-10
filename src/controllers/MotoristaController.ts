@@ -30,7 +30,7 @@ class MotoristaController {
         const { id } = req.params;
         const motoristaEditado = await MotoristaService.editarMotorista(Number(id), req.body);
         return res.status(200).json({
-            message: 'Motorista updated com sucesso!',
+            message: 'Motorista editado com sucesso!',
             motoristaEditado
         });
     }

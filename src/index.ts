@@ -18,11 +18,11 @@ import rotasEndereco from './routes/RotasEndereco';
 import rotasBairro from './routes/RotasBairro'; 
 import rotasCidade from './routes/RotasCidade'; 
 import rotasEstado from './routes/RotasEstado'; 
-import rotasPais from './routes/RotasPais'; 
-import rotasWhatsapp from './routes/RotasWhatsApp'; 
-import rotasRota from './routes/RotasRota'; 
+import rotasPais from './routes/RotasPais';
+import rotasRota from './routes/RotasRota';
 import rotasAtribuicao from './routes/RotasAtrbuicao'; 
 import MiddlewareErro from './middlewares/MiddlewareErro'; 
+import rotasWhatsApp from './routes/RotasWhatsApp';
 
 const app = express(); 
 app.use(cors()); 
@@ -63,7 +63,7 @@ async function startApp() {
         app.use(rotasPais); 
         app.use(rotasRota); 
         app.use(rotasAtribuicao); 
-        app.use(rotasWhatsapp); 
+        app.use(rotasWhatsApp); 
         app.use(MiddlewareErro); 
 
         // 5. Inicialização do Servidor Express na Rede Local

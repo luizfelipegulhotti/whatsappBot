@@ -14,24 +14,38 @@ class RotaService {
 
     // Service para listar todas as rotas:
     static async listarRotas(): Promise<Rota[]> {
-        return await this.rotaRepositorio.find({
+        const listaDeRotasBrutas = await this.rotaRepositorio.find({
             relations: ["passageiros", "passageiros.endereco", "passageiros.endereco.bairro", "empresas", "listaRota"],
             order: { 
-                ordem: "ASC",
                 passageiros: { ordem_na_rota: "ASC" }
             }
+        });
+
+        // ORDENAÇÃO NUMÉRICA SEGURA: Extrai estritamente os dígitos de dentro da string "ROTA X"
+        return listaDeRotasBrutas.sort((rotaAvaliada, proximaRota) => {
+            const numeroRotaAvaliada = Number(rotaAvaliada.ordem.replace(/\D/g, '')) || 0;
+            const numeroProximaRota = Number(proximaRota.ordem.replace(/\D/g, '')) || 0;
+
+            return numeroRotaAvaliada - numeroProximaRota;
         });
     }
 
     // Service para listar rotas por TURNO (Tarde ou Madrugada):
     static async listarPorTurno(tipo: 'ROTA_TARDE' | 'ROTA_MADRUGADA'): Promise<Rota[]> {
-        return await this.rotaRepositorio.find({
+        const listaDeRotasPorTurno = await this.rotaRepositorio.find({
             where: { tipo_rota: tipo },
             relations: ["passageiros", "passageiros.endereco", "passageiros.endereco.bairro", "empresas"],
             order: { 
-                ordem: "ASC",
                 passageiros: { ordem_na_rota: "ASC" }
             }
+        });
+
+        // ORDENAÇÃO NUMÉRICA SEGURA: Limpa o texto mantendo o peso matemático correto para o índice 10
+        return listaDeRotasPorTurno.sort((rotaAvaliada, proximaRota) => {
+            const numeroRotaAvaliada = Number(rotaAvaliada.ordem.replace(/\D/g, '')) || 0;
+            const numeroProximaRota = Number(proximaRota.ordem.replace(/\D/g, '')) || 0;
+
+            return numeroRotaAvaliada - numeroProximaRota;
         });
     }
 

@@ -2,6 +2,7 @@ import { AppDataSource } from "../data-source";
 import NaoEncontradoErro from "../error/NaoEncontrado.404";
 import IPais from "../interfaces/IPais";
 import { Pais } from "../models/Pais";
+import TextoHelper from "../utils/helpers/TextoHelper";
 import validarCamposObrigatorios from "../utils/helpers/VerificarCamposObrigatorios";
 import VerificarDuplicidade from "../utils/helpers/VerificarDuplicidade";
 
@@ -32,6 +33,10 @@ class PaisService {
     static async cadastrarPais(dados: IPais): Promise<Pais> {
         validarCamposObrigatorios<Pais>(dados as Pais, ['nome']);
 
+        if(dados.nome) {
+            dados.nome = TextoHelper.sanitizarNome(dados.nome);
+        }
+
         // 1. Lógica para evitar duplicação: busca pelo nome antes de criar
         const paisExistente = await this.paisRepositorio.findOneBy({ 
             nome: dados.nome 
@@ -50,6 +55,10 @@ class PaisService {
     // Rota para editar um país:
     static async editarPais(id: number, dados: Partial<IPais>): Promise<Pais> {
         const paisAtualizado = await this.paisRepositorio.findOneBy({ id });
+
+        if(dados.nome) {
+            dados.nome = TextoHelper.sanitizarNome(dados.nome);
+        }
 
         if (!paisAtualizado) {
             throw new NaoEncontradoErro('Pais não encontrado para a edição');

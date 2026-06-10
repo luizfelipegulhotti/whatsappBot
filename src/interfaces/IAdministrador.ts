@@ -5,6 +5,7 @@ interface IAdministrador {
     email: string,
     senha: string,
     telefoneWhatsApp: string,
+    whatsappLid?: string;
 }
 
 export default IAdministrador;

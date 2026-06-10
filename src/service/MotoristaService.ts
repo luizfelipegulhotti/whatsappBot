@@ -4,14 +4,13 @@ import NaoEncontradoErro from "../error/NaoEncontrado.404";
 import IMotorista from "../interfaces/IMotorista";
 import validarCamposObrigatorios from "../utils/helpers/VerificarCamposObrigatorios";
 import VerificarDuplicidade from "../utils/helpers/VerificarDuplicidade";
+import TextoHelper from "../utils/helpers/TextoHelper";
 
 class MotoristaService {
     private static motoristaRepositorio = AppDataSource.getRepository(Motorista);
 
-    /**
-     * Tradutor Universal baseado no LID: Localiza o motorista de forma explícita
-     * recebendo tanto o ID sequencial numérico quanto o JID/LID textual do WhatsApp.
-     */
+    // Tradutor Universal baseado no LID: Localiza o motorista de forma explícita
+    // recebendo tanto o ID sequencial numérico quanto o JID/LID textual do WhatsApp.    
     static async resolverMotorista(parametro: string | number): Promise<Motorista> {
         const stringParam = String(parametro);
 
@@ -27,6 +26,7 @@ class MotoristaService {
         return await this.mostrarUmMotorista(Number(parametro));
     }
 
+    // Service para listar todos os motoristas
     static async listarMotoristas(): Promise<Motorista[]> {
         return await this.motoristaRepositorio.find({
             select: {
@@ -34,11 +34,13 @@ class MotoristaService {
                 nome: true,
                 telefoneWhatsApp: true,
                 whatsAppLid: true,
-                ativo: true
+                ativo: true,
+                podeFazerRota: true
             },
         });
     }
 
+    // Service para mostrar um motorista (por ID):
     static async mostrarUmMotorista(id: number): Promise<Motorista> {
         const motorista = await this.motoristaRepositorio.findOne({
             where: { id },
@@ -47,7 +49,8 @@ class MotoristaService {
                 nome: true,
                 telefoneWhatsApp: true,
                 whatsAppLid: true,
-                ativo: true
+                ativo: true,
+                podeFazerRota: true
             },
         });
 
@@ -58,9 +61,7 @@ class MotoristaService {
         return motorista;
     }
     
-    /**
-     * BUSCA PRINCIPAL POR LID
-     */
+    // Service para buscar motorista por @lid:
     static async buscarPorLid(whatsAppLid: string): Promise<Motorista | null> {
         const jidLimpo = whatsAppLid.replace(/:[0-9]+/, '');
         return await this.motoristaRepositorio.findOne({
@@ -87,10 +88,15 @@ class MotoristaService {
         }
     }
     
+    // Service para cadastrar motorista:
     static async cadastrarMotorista(dados: IMotorista): Promise<Motorista> {
         validarCamposObrigatorios<Motorista>(dados as Motorista, 
             [ 'nome', 'telefoneWhatsApp', 'whatsAppLid' ]
         );
+
+        if(dados.nome) {
+            dados.nome = TextoHelper.sanitizarNome(dados.nome);
+        }
 
         dados.whatsAppLid = dados.whatsAppLid.replace(/:[0-9]+/, '');
 
@@ -104,8 +110,13 @@ class MotoristaService {
         );
     }
 
+    // Service para editar motorista: 
     static async editarMotorista(id: number, dados: Partial<IMotorista>): Promise<Motorista> {
         const motorista = await this.motoristaRepositorio.findOne({ where: { id } });
+
+        if(dados.nome) {
+            dados.nome = TextoHelper.sanitizarNome(dados.nome);
+        }
 
         if (!motorista) {
             throw new NaoEncontradoErro('Motorista não encontrado!');
@@ -124,6 +135,7 @@ class MotoristaService {
         return await this.motoristaRepositorio.save(motorista);
     }
 
+    // Service para alterar o status do motorista (ativo, inativo):
     static async alterarStatusAtivo(whatsAppLid: string, status: boolean): Promise<void> {
         const jidLimpo = whatsAppLid.replace(/:[0-9]+/, '');
         const motorista = await this.motoristaRepositorio.findOneBy({ whatsAppLid: jidLimpo });
@@ -134,6 +146,7 @@ class MotoristaService {
         await this.motoristaRepositorio.save(motorista);
     }
     
+    // Service para deletar motorista:
     static async deletarMotorista(id: number): Promise<void> {
         const motorista = await this.motoristaRepositorio.findOneBy({ id });
         if (!motorista) {

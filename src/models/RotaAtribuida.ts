@@ -1,4 +1,4 @@
-import { Column, Entity, ManyToOne, OneToMany, PrimaryGeneratedColumn } from "typeorm";
+import { Column, Entity, ManyToOne, OneToMany, PrimaryGeneratedColumn, Index } from "typeorm";
 import { Motorista } from "./Motorista";
 import { ListaJoia } from "./ListaJoia";
 import { ListaRota } from "./ListaRota";
@@ -10,29 +10,34 @@ export class RotaAtribuida {
     @PrimaryGeneratedColumn()
     id!: number;
 
-    // Faltava esta linha para o Service parar de dar erro:
-    @Column({ type: "timestamp", name: "dataGeracao" }) 
+    @Column({ type: "date", name: "dataGeracao" }) 
     dataGeracao!: Date;
 
-    @ManyToOne(() => Motorista)
+    @Index()
+    @ManyToOne(() => Motorista, { onDelete: 'CASCADE' })
     motorista!: Motorista;
 
-     @Column({
+    @Column({
         type: "enum",
         enum: ["ROTA", "APOIO", "PLANTAO"],
         default: "ROTA"
     })
     tipoAtribuicao!: "ROTA" | "APOIO" | "PLANTAO";
 
-    @ManyToOne(() => ListaJoia)
+    @Column({ nullable: true})
+    ehApoioManual?: boolean;
+
+    @Index()
+    @ManyToOne(() => ListaJoia, { onDelete: 'CASCADE' })
     listaJoia!: ListaJoia;
 
-    @ManyToOne(() => ListaRota, lista => lista.rotaLista)
+    @Index()
+    @ManyToOne(() => ListaRota, lista => lista.rotaLista, { onDelete: 'CASCADE' })
     listaRota!: ListaRota;
 
     @OneToMany(() => Passageiro, passageiro => passageiro.corridaSolicitada)
     passageiros!: Passageiro[];
 
-    @ManyToOne(() => Rota)
+    @ManyToOne(() => Rota, { onDelete: 'CASCADE' })
     rota!: Rota;
 }

@@ -7,6 +7,7 @@ import IPais from "../interfaces/IPais";
 import PaisService from "./PaisService";
 import validarCamposObrigatorios from "../utils/helpers/VerificarCamposObrigatorios";
 import VerificarDuplicidade from "../utils/helpers/VerificarDuplicidade";
+import TextoHelper from "../utils/helpers/TextoHelper";
 
 class EstadoService {
     private static estadoRepositorio = AppDataSource.getRepository(Estado);
@@ -14,10 +15,12 @@ class EstadoService {
     // Service para listar estados:
     static async listarEstados(): Promise<Estado[]> {
         const estados = await this.estadoRepositorio.find({
-            select: { 
-                id: true, 
-                nome: true, 
-                pais: { id: true, nome: true }, 
+            select: {
+                id: true,
+                nome: true,
+                pais: { id: true,
+                        nome: true
+                    },
             },
             relations: ['pais'],
         });
@@ -45,10 +48,12 @@ class EstadoService {
     static async cadastrarEstado(dados: IEstado): Promise<Estado> {
         validarCamposObrigatorios<Estado>(dados as Estado, ['nome']);
 
-        // 1. Resolve o País chamando o PaisService (Garante ID e evita duplicação no topo)
+        if(dados.nome) {
+            dados.nome = TextoHelper.sanitizarNome(dados.nome);
+        }
+
         const paisFinal = await PaisService.cadastrarPais(dados.pais as IPais);
 
-        // 2. BUSCA PREVENTIVA: Tenta encontrar o Estado exato antes de qualquer ação
         const estadoExistente = await this.estadoRepositorio.findOne({
             where: { 
                 nome: dados.nome, 
@@ -56,12 +61,10 @@ class EstadoService {
             }
         });
 
-        // Se o registro já existe, retornamos ele com o ID original (evita duplicação)
         if (estadoExistente) {
             return estadoExistente;
         }
 
-        // 3. VALIDAÇÃO DE INTEGRIDADE: Se for novo, garantimos que não há conflitos
         await VerificarDuplicidade<Estado>({
             repositorio: this.estadoRepositorio,
             dados: { 
@@ -70,7 +73,6 @@ class EstadoService {
             },
         });
 
-        // 4. CRIAÇÃO: Registra o novo Estado vinculado ao ID do País correto
         const novoEstado = this.estadoRepositorio.create({
             ...dados,
             pais: paisFinal,
@@ -86,20 +88,20 @@ class EstadoService {
             relations: ['pais'] 
         });
 
+        if(dados.nome) {
+            dados.nome = TextoHelper.sanitizarNome(dados.nome);
+        }
+
         if (!estadoAtual) {
             throw new NaoEncontradoErro('Estado não encontrado para a edição!');
         }
 
         let paisFinal = estadoAtual.pais;
 
-        // Se o país foi enviado na edição, resolvemos o ID dele primeiro
         if (dados.pais) {
             paisFinal = await PaisService.cadastrarPais(dados.pais as IPais);
         };
 
-        // VALIDAÇÃO DE EDIÇÃO SEGURA: 
-        // Passamos o 'idParaIgnorar' (ID do próprio Estado) para que a 
-        // verificação não barre a atualização do próprio registro.
         if (dados.nome || dados.pais) {
             await VerificarDuplicidade<Estado>({
                 repositorio: this.estadoRepositorio,

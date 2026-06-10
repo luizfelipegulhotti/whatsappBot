@@ -1,17 +1,17 @@
 import { AppDataSource } from "../data-source";
+import { IsNull } from "typeorm";
 import { Passageiro } from "../models/Passageiro";
 import NaoEncontradoErro from "../error/NaoEncontrado.404";
 import IPassageiro from "../interfaces/IPassageiro";
 import validarCamposObrigatorios from "../utils/helpers/VerificarCamposObrigatorios";
 import VerificarDuplicidade from "../utils/helpers/VerificarDuplicidade";
 import EnderecoService from "./EndereçoService";
-import { IsNull } from "typeorm";
-
-// IMPORTAÇÃO DO SERVICE DE ENDEREÇO (A única necessária aqui)
+import TextoHelper from "../utils/helpers/TextoHelper";
 
 class PassageiroService {
     private static passageiroRepositorio = AppDataSource.getRepository(Passageiro);
 
+    // Service para listar passageiros
     static async listarPassageiros(): Promise<Passageiro[]> {
         return await this.passageiroRepositorio.find({
             select: { 
@@ -23,6 +23,7 @@ class PassageiroService {
         });
     };
 
+    // Service para mostrar um passageiro (por ID):
     static async mostrarUmPassageiro(id: number): Promise<Passageiro> {
         const passageiro = await this.passageiroRepositorio.findOne({
             where: { id },
@@ -32,12 +33,13 @@ class PassageiroService {
         return passageiro;
     };
 
+    // Service para listar passageiros vinculados à uma empresa e disponíveis:
     static async listarDisponiveisPorEmpresa(empresaId: number): Promise<Passageiro[]> {
         return await this.passageiroRepositorio.find({
             where: {
                 empresa: { id: empresaId },
                 rota: IsNull(), // Filtra quem não tem rotaId preenchido
-                ativo: true     // Apenas passageiros ativos
+                ativo: true
             },
             relations: ["endereco", "endereco.bairro"],
             select: {
@@ -52,13 +54,19 @@ class PassageiroService {
         });
     }
 
+    // Buscar passageiros segundo seus números de telefone:
     static async buscarPorTelefone(telefoneWhatsApp: string): Promise<Passageiro | null> {
         return await this.passageiroRepositorio.findOne({ where: { telefoneWhatsApp } });
     };
 
+    // Service para cadastrar passageiros:
     static async cadastrarPassageiro(dados: IPassageiro): Promise<Passageiro> {
         validarCamposObrigatorios<Passageiro>(dados as Passageiro, ['nome', 'endereco', 'empresa']);
         await VerificarDuplicidade<Passageiro>({ repositorio: this.passageiroRepositorio, dados: { telefoneWhatsApp: dados.telefoneWhatsApp } });
+
+        if(dados.nome) {
+            dados.nome = TextoHelper.sanitizarNome(dados.nome);
+        }
 
         // DELEGAÇÃO: O EnderecoService resolve Bairro/Cidade/Estado e retorna o Endereço com ID
         // Isso garante que o bairroId não chegue como DEFAULT no banco
@@ -66,18 +74,23 @@ class PassageiroService {
         dados.endereco = enderecoComId;
 
         const novoPassageiro = this.passageiroRepositorio.create(dados);
+
         return await this.passageiroRepositorio.save(novoPassageiro);
     };
 
-        static async editarPassageiro(id: number, dados: Partial<IPassageiro>): Promise<Passageiro> {
+    // Service para editar passageiro:
+    static async editarPassageiro(id: number, dados: Partial<IPassageiro>): Promise<Passageiro> {
         const passageiro = await this.passageiroRepositorio.findOne({ 
             where: { id }, 
             relations: ["endereco"] 
         });
 
+        if(dados.nome) {
+            dados.nome = TextoHelper.sanitizarNome(dados.nome);
+        }
+
         if (!passageiro) throw new NaoEncontradoErro('Passageiro não encontrado!');
 
-        // 1. Verificação de duplicidade (ignora o próprio ID)
         if (dados.telefoneWhatsApp) {
             await VerificarDuplicidade<Passageiro>({ 
                 repositorio: this.passageiroRepositorio, 
@@ -86,13 +99,10 @@ class PassageiroService {
             });
         }
 
-        // 2. Resolve o endereço apenas se ele foi enviado no body
         if (dados.endereco && (dados.endereco.nome || dados.endereco.numero)) {
             dados.endereco = await EnderecoService.cadastrarEndereco(dados.endereco);
         }
 
-        // 3. ATUALIZAÇÃO EXPLÍCITA: O merge pode falhar com booleanos 'false' vindos de objetos parciais.
-        // Forçamos a atribuição se o campo existir no objeto 'dados'
         if (dados.ativo !== undefined) {
             passageiro.ativo = dados.ativo;
         }
@@ -102,6 +112,7 @@ class PassageiroService {
         return await this.passageiroRepositorio.save(passageiro);
     };
 
+    // Service para deletar passageiro:
     static async deletarPassageiro(id: number): Promise<void> {
         const passageiro = await this.passageiroRepositorio.findOneBy({ id });
         if (!passageiro) throw new NaoEncontradoErro('Passageiro não encontrado!');
