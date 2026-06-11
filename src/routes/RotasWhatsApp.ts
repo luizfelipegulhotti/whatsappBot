@@ -22,18 +22,36 @@ const rotasWhatsApp = Router();
  * blindando o sistema contra viradas de mês e ano.
  */
 function calcularDataAlvoSegura(diaDigitado: number): Date {
-    const hoje = new Date();
-    let anoAlvo = hoje.getFullYear();
-    let mesAlvo = hoje.getMonth();
+    // 1. Obtém a data/hora atual no fuso de Brasília formatada ISO
+    const dataBrasiliaStr = new Date().toLocaleString("en-US", { timeZone: "America/Sao_Paulo" });
+    const hojeBrasilia = new Date(dataBrasiliaStr);
 
-    if (diaDigitado > hoje.getDate()) {
+    let anoAlvo = hojeBrasilia.getFullYear();
+    let mesAlvo = hojeBrasilia.getMonth();
+    const diaAtualBrasilia = hojeBrasilia.getDate();
+
+    // 2. Lógica retroativa inteligente baseada no dia real de Brasília
+    if (diaDigitado > diaAtualBrasilia) {
         mesAlvo -= 1;
         if (mesAlvo < 0) {
             mesAlvo = 11;
             anoAlvo -= 1;
         }
     }
-    return new Date(anoAlvo, mesAlvo, diaDigitado, 12, 0, 0, 0);
+
+    // 3. Monta a data alvo localmente com segurança
+    const dataAlvoLocal = new Date(anoAlvo, mesAlvo, diaDigitado, 12, 0, 0, 0);
+
+    // 4. 🔥 TRUQUE MESTRE: Ajusta o objeto Date para que o valor em UTC espelhe o horário de Brasília.
+    // Isso garante que quando o TypeORM salvar ou buscar no MySQL usando UTC, a data não mude de dia.
+    const diferencaFuso = dataAlvoLocal.getTimezoneOffset(); // Diferença em minutos da máquina atual
+    if (diferencaFuso !== 180) { // Se a máquina NÃO estiver em fuso -03:00 (Brasília)
+        // Força a compensação manual para congelar a data no dia correto
+        const deslocamentoMilisegundos = (diferencaFuso - 180) * 60 * 1000;
+        return new Date(dataAlvoLocal.getTime() + deslocamentoMilisegundos);
+    }
+
+    return dataAlvoLocal;
 }
 
 /**

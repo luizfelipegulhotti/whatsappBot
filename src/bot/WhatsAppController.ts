@@ -14,7 +14,7 @@ import { EscalaService } from "../service/whatsapp/EscalaService";
 import { EmojiHelper } from "../utils/helpers/EmojiHelper"; 
 import { AppDataSource } from "../data-source"; 
 import 'dotenv/config'; 
-import cron from "node-cron"; 
+import cron, { ScheduledTask } from "node-cron"; 
 import MotoristaService from "../service/MotoristaService"; 
 import { Motorista } from "../models/Motorista";
 import formatarDataIsoPura from '../utils/formatters/formatarDataPorDia';
@@ -335,14 +335,25 @@ export class WhatsAppController {
     });
   }
 
+
+// Propriedade da classe para armazenar as tarefas ativas
+  private tarefasAtivas: ScheduledTask[] = [];
+
   private configurarCronjobs(): void { 
     if (!this.grupoId) return; 
+
+     this.destruirCronjobs();
+
+    // 1. Para e limpa agendamentos anteriores
+    this.tarefasAtivas.forEach(tarefa => tarefa.stop());
+    this.tarefasAtivas = [];
 
     const cronOptions = {
       timezone: "America/Sao_Paulo"
     };
 
-    cron.schedule('0 5 * * *', async () => { 
+    // 2. Agenda o job da manhã (05:00)
+    const jobManha = cron.schedule('0 5 * * *', async () => { 
       try { 
         const lista = await this.registroService.buscarOuCriarListaDoDia(); 
         const relatorio = await this.escalaService.gerarEscalaCompleta(lista.id); 
@@ -352,31 +363,47 @@ export class WhatsAppController {
       } 
     }, cronOptions); 
 
-    cron.schedule('4 20 * * *', async () => { 
+    // 3. Agenda o job da noite (20:04)
+    const jobNoite = cron.schedule('4 20 * * *', async () => { 
       try { 
         const lista = await this.registroService.buscarOuCriarListaDoDia(); 
         const penalizados = await this.registroService.buscarMotoristasPenalizados(lista.id); 
         if (penalizados && penalizados.length > 0) { 
-          let relatorio = ""; 
-          penalizados.forEach((m, i) => { relatorio += `${i + 1}. *${m.nome}*\n`; }); 
-          const msg = "Os seguintes motoristas queimaram a largada:\n\n" + relatorio; 
+          const relatorio = penalizados.map((m, i) => `${i + 1}. *${m.nome}*`).join('\n');
+          const msg = `Os seguintes motoristas queimaram a largada:\n\n${relatorio}`; 
           await this.enviarMensagemElegante(this.grupoId, "⚠️ QUEIMARAM A LARGADA", msg); 
         } 
       } catch (error: unknown) { 
         console.error(`[ERRO CRON 20:04]: ${(error as Error).message}`); 
       } 
     }, cronOptions); 
-  } 
 
-  private async processarComandosAdmin(msg: proto.IWebMessageInfo, comando: string, autorLid: string): Promise<boolean> { 
+    // 4. Salva as referências no array da classe
+    this.tarefasAtivas.push(jobManha, jobNoite);
+  }
+
+    // Executado na desconexão do bot ou encerramento limpo do app
+  public destruirCronjobs(): void {
+    if (this.tarefasAtivas.length === 0) return;
+
+    console.log(`[CRON] Parando ${this.tarefasAtivas.length} tarefas agendadas...`);
+    this.tarefasAtivas.forEach(tarefa => tarefa.stop());
+    this.tarefasAtivas = [];
+  }
+ 
+
+private async processarComandosAdmin(msg: proto.IWebMessageInfo, comando: string, autorLid: string): Promise<boolean> { 
+    // 1. Validação de Segurança de Administrador
     const isAdmin = await this.registroService.verificarSeEhAdmin(autorLid, this.sock!); 
     if (!isAdmin) return false; 
 
+    // Sanitiza e quebra o comando em argumentos limpos
     const partes = comando.trim().split(/\s+/); 
     const acao = partes[0];      
     const parametro = partes[1]; 
 
-    if (comando === '@motoristas') { 
+    // COMANDO ADMINISTRATIVO: @motoristas
+    if (acao === '@motoristas') { 
       const motoristas = await MotoristaService.listarMotoristas(); 
       if (!motoristas || motoristas.length === 0) { 
         await this.enviarMensagemElegante(this.grupoId, "MOTORISTAS", "📭 Nenhum motorista cadastrado."); 
@@ -390,7 +417,8 @@ export class WhatsAppController {
       return true; 
     } 
 
-    if (comando === '@abrir_cadastro') { 
+    // COMANDO ADMINISTRATIVO: @abrir_cadastro
+    if (acao === '@abrir_cadastro') { 
       this.cadastroAberto = true; 
       await this.enviarMensagemElegante(
         this.grupoId, 
@@ -400,7 +428,8 @@ export class WhatsAppController {
       return true; 
     } 
 
-    if (comando === '@fechar_cadastro') { 
+    // COMANDO ADMINISTRATIVO: @fechar_cadastro
+    if (acao === '@fechar_cadastro') { 
       this.cadastroAberto = false; 
       await this.enviarMensagemElegante(
         this.grupoId, 
@@ -410,6 +439,7 @@ export class WhatsAppController {
       return true;
     } 
 
+    // COMANDO ADMINISTRATIVO: @tipo_dia [DD/MM/AAAA] [TIPO]
     if (acao === '@tipo_dia') { 
       const tipoInformado = partes[2]; 
       if (!parametro || !tipoInformado) { 
@@ -425,137 +455,140 @@ export class WhatsAppController {
       return true; 
     } 
 
+    // COMANDO ADMINISTRATIVO: @limpar_dia [DD/MM/AAAA]
     if (acao === '@limpar_dia') { 
-      if (!parametro) return true; 
+      if (!parametro) {
+        await this.enviarMensagemElegante(this.grupoId, "ERRO", "❌ Informe a data: `@limpar_dia DD/MM/AAAA`.");
+        return true; 
+      }
       await this.escalaService.removerTipoDiaManual(parametro); 
       await this.enviarMensagemElegante(this.grupoId, "CONFIGURAÇÃO", `✅ Marcação removida.`); 
       return true; 
     } 
 
-    if (comando === '@listar_feriados') { 
+    // COMANDO ADMINISTRATIVO: @listar_feriados
+    if (acao === '@listar_feriados') { 
       const lista = await this.escalaService.listarDiasManuais(); 
       await this.enviarMensagemElegante(this.grupoId, "📅 FERIADOS", lista); 
       return true; 
-    } 
-
+    }
+    // Captura de Menções / Contexto do WhatsApp (Baileys)
     const listaMencoes = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid; 
     const mencionadoJid = listaMencoes && listaMencoes.length > 0 ? listaMencoes[0] : null; 
     const lidMencionado = mencionadoJid ? mencionadoJid.replace(/:[0-9]+/, '').split('@')[0] : null; 
 
-    if (comando.startsWith('@add') && !comando.includes(' posição ')) { 
-      if (!lidMencionado) return true; 
+    // COMANDO ADMINISTRATIVO: @add @Mencao OU @add NomeDoMotorista
+    if (acao === '@add') { 
       try { 
         const lista = await this.registroService.buscarOuCriarListaDoDia(); 
-        await this.registroService.adicionarMotoristaManualmente(lidMencionado, lista.id, this.sock!); 
-        await this.enviarMensagemElegante(this.grupoId, "SUCESSO", `✅ Adicionado por @lid.`); 
-      } catch (error: unknown) { 
-        try {
-          const textoLimpo = comando.replace(/@[a-zA-Z0-9_]+\s+@/g, '').replace(/@add\s+@/i, '').replace(/\s+\d+$/, '').trim();
-          const fragmentos = textoLimpo.split(/\s+/);
-          if (fragmentos.length >= 1) {
-            const motoristaPorNome = await AppDataSource.getRepository(Motorista).findOne({
-              where: { nome: ILike(`%${fragmentos[0]}%`), ativo: true } 
-            });
-            if (motoristaPorNome) {
-              const lista = await this.registroService.buscarOuCriarListaDoDia();
-              await this.registroService.adicionarMotoristaManualmente(motoristaPorNome.whatsAppLid || '', lista.id, this.sock!);
-              await this.enviarMensagemElegante(this.grupoId, "SUCESSO", `✅ Adicionado por Nome.`);
-              return true;
-            }
-          }
-        } catch (innerError) {}
+
+        if (lidMencionado) { 
+          await this.registroService.adicionarMotoristaManualmente(lidMencionado, lista.id, this.sock!); 
+          await this.enviarMensagemElegante(this.grupoId, "SUCESSO", `✅ Adicionado por menção.`); 
+          return true; 
+        } 
+
+        const textoSemAcao = comando.replace(/@add\s+/i, '').trim();
+        if (!textoSemAcao) {
+          await this.enviarMensagemElegante(this.grupoId, "ERRO", `❌ Marque um usuário ou digite o nome: \`@add Nome\``);
+          return true;
+        }
+
+        const motoristaPorNome = await AppDataSource.getRepository(Motorista).findOne({
+          where: { nome: ILike(`%${textoSemAcao}%`), ativo: true } 
+        });
+
+        if (motoristaPorNome) {
+          await this.registroService.adicionarMotoristaManualmente(motoristaPorNome.whatsAppLid || '', lista.id, this.sock!);
+          await this.enviarMensagemElegante(this.grupoId, "SUCESSO", `✅ Adicionado motorista: *${motoristaPorNome.nome}*.`);
+        } else {
+          await this.enviarMensagemElegante(this.grupoId, "AVISO", `❌ Motorista não encontrado por nome ou menção.`);
+        }
+      } catch (error: unknown) {
+        console.error(`[ERRO @add]:`, error);
+        await this.enviarMensagemElegante(this.grupoId, "ERRO", `❌ Falha ao adicionar: ${(error as Error).message}`);
       } 
       return true; 
     } 
 
     // COMANDO ADMINISTRATIVO: @inserir @Contato posição X [dia]
-    if (comando.startsWith('@inserir')) { 
+    if (acao === '@inserir') { 
       const partesCmd = comando.split(' posição '); 
-      if (!lidMencionado || partesCmd.length <= 1) return true;
+      if (!lidMencionado || partesCmd.length <= 1) {
+        await this.enviarMensagemElegante(this.grupoId, "ERRO", "❌ Mencione o motorista. Uso: `@inserir @Contato posição X [dia]`");
+        return true;
+      }
 
       const restoTexto = partesCmd[1].trim(); 
       const numerosMatch = restoTexto.match(/^(\d+)(?:\s+(\d+))?$/);
 
       if (!numerosMatch) {
-        await this.enviarMensagemElegante(this.grupoId, "ERRO", "❌ Use: `@inserir @Contato posição X [dia]`");
+        await this.enviarMensagemElegante(this.grupoId, "ERRO", "❌ Formato numérico inválido. Use: `@inserir @Contato posição X [dia]`");
         return true;
       }
 
-      // Garante strings puras extraídas do array do regex para evitar erro RegExpMatchArray
-      const posicaoStr: string = numerosMatch[1];
-      const diaStr: string | undefined = numerosMatch[2];
-
-      const posicao = parseInt(posicaoStr, 10);
-      const diaDigitado = diaStr ? parseInt(diaStr, 10) : undefined;
+      const posicao = parseInt(numerosMatch[1], 10);
+      const diaDigitado = numerosMatch[2] ? parseInt(numerosMatch[2], 10) : undefined;
 
       try { 
-        // Lógica de calendário segura e anti-virada de ano/mês
         const dataAlvo = this.calcularDataAlvoSegura(diaDigitado);
-
-        // Envia a data como Date para o método unificado
-        await this.registroService.inserirEmPosicaoEspecifica(
-          lidMencionado, 
-          dataAlvo, 
-          posicao,
-        ); 
+        await this.registroService.inserirEmPosicaoEspecifica(lidMencionado, dataAlvo, posicao); 
         
         const dataFormatada = `${dataAlvo.getDate().toString().padStart(2, '0')}/${(dataAlvo.getMonth() + 1).toString().padStart(2, '0')}`;
         await this.enviarMensagemElegante(this.grupoId, "SUCESSO", `✅ Inserido na posição ${posicao} da lista do dia ${dataFormatada}.`); 
       } catch (error: unknown) {
-        const msgErro = error instanceof Error ? error.message : "Erro desconhecido ao inserir.";
-        await this.enviarMensagemElegante(this.grupoId, "ERRO", `❌ ${msgErro}`);
+        await this.enviarMensagemElegante(this.grupoId, "ERRO", `❌ ${(error as Error).message}`);
       } 
       return true; 
     } 
 
     // COMANDO ADMINISTRATIVO: @remover @Contato [dia]
-    if (comando.startsWith('@remover')) { 
+    if (acao === '@remover') { 
       if (!lidMencionado) {
         await this.enviarMensagemElegante(this.grupoId, "ERRO", "❌ Identificação ausente. Por favor, marque o motorista.");
         return true;
       }
 
       try { 
-        // 1. Captura o número do dia ao final da string se existir
         const matchDia = comando.match(/\s+(\d+)$/);
-        const diaStr: string | undefined = matchDia ? matchDia[1] : undefined;
-        const diaDigitado = diaStr ? parseInt(diaStr, 10) : undefined;
-
-        // 2. Calcula a data alvo blindada contra quebras de calendário (Mês/Ano)
+        const diaDigitado = matchDia ? parseInt(matchDia[1], 10) : undefined;
         const dataAlvo = this.calcularDataAlvoSegura(diaDigitado);
 
-        // 3. 🔥 CORREÇÃO: Passa a dataAlvo (Date) diretamente, respeitando a assinatura restaurada.
-        // Removido a passagem do ID numérico e do parâmetro 'this.sock' que foi simplificado.
-        await this.registroService.removerMotoristaDaLista(
-          lidMencionado, 
-          dataAlvo
-        ); 
+        await this.registroService.removerMotoristaDaLista(lidMencionado, dataAlvo); 
 
         const dataFormatada = `${dataAlvo.getDate().toString().padStart(2, '0')}/${(dataAlvo.getMonth() + 1).toString().padStart(2, '0')}`;
         await this.enviarMensagemElegante(this.grupoId, "SUCESSO", `✅ Removido com sucesso da lista do dia ${dataFormatada}.`); 
       } catch (error: unknown) { 
-        const msgErro = error instanceof Error ? error.message : "Erro ao tentar remover.";
-        await this.enviarMensagemElegante(this.grupoId, "ERRO", `❌ ${msgErro}`);
+        await this.enviarMensagemElegante(this.grupoId, "ERRO", `❌ ${(error as Error).message}`);
       } 
       return true; 
     }
 
- 
-
+    // COMANDO ADMINISTRATIVO: @ativar ou @inativar
     if (acao === '@ativar' || acao === '@inativar') { 
-      if (!lidMencionado) return true; 
+      if (!lidMencionado) {
+        await this.enviarMensagemElegante(this.grupoId, "ERRO", "❌ Identificação ausente. Marque o motorista.");
+        return true; 
+      }
       try {
         const motorista = await MotoristaService.buscarPorLid(lidMencionado); 
-        if (!motorista) return true; 
+        if (!motorista) {
+          await this.enviarMensagemElegante(this.grupoId, "ERRO", "❌ Motorista não encontrado no banco de dados.");
+          return true; 
+        }
         const novoStatus = acao === '@ativar'; 
         await MotoristaService.alterarStatusAtivo(motorista.whatsAppLid || '', novoStatus); 
-        await this.enviarMensagemElegante(this.grupoId, "STATUS", `👤 Alterado para ${novoStatus ? "Ativo" : "Inativo"}.`); 
-      } catch (error: unknown) { } 
+        await this.enviarMensagemElegante(this.grupoId, "STATUS", `👤 O motorista *${motorista.nome}* foi alterado para: ${novoStatus ? "✅ Ativo" : "🚫 Inativo"}.`); 
+      } catch (error: unknown) { 
+        console.error(`[ERRO ${acao}]:`, error);
+        await this.enviarMensagemElegante(this.grupoId, "ERRO", `❌ Falha ao alterar status: ${(error as Error).message}`);
+      } 
       return true; 
     }
-    
+    // Limpeza de caracteres invisíveis Unicode (ex: ZWSP) que quebram o parser
     const textoLimpo = comando.replace(/[\u2000-\u200B\u2028\u2029\uFEFF]/g, '').trim();
 
+    // COMANDO ADMINISTRATIVO: @extrair_lid
     if (textoLimpo.includes('@extrair_lid')) {
       const lidDoGrupo = msg.key?.remoteJid || 'Não detectado';
       
@@ -572,33 +605,35 @@ export class WhatsAppController {
       return true;
     }
 
-    // COMANDO ADMINISTRATIVO: @refazer [dia_do_joinha]
+    // COMANDO ADMINISTRATIVO: @refazer [dia_da_geracao]
     if (acao === '@refazer') {
       const diaDigitado = parseInt(parametro, 10);
 
       if (isNaN(diaDigitado) || diaDigitado < 1 || diaDigitado > 31) {
-        await this.enviarMensagemElegante(this.grupoId, "ERRO", "❌ Use: `@refazer [dia]` (Exemplo: `@refazer 4`).");
+        await this.enviarMensagemElegante(this.grupoId, "ERRO", "❌ Use: `@refazer [dia]` (Exemplo: `@refazer 10`).");
         return true;
       }
 
-      await this.enviarMensagemElegante(this.grupoId, "SISTEMA", `🔄 Processando nova atribuição de rotas para a lista do dia *${diaDigitado.toString().padStart(2, '0')}*...`);
+      await this.enviarMensagemElegante(this.grupoId, "SISTEMA", `🔄 Localizando a lista gerada no dia ${diaDigitado.toString().padStart(2, '0')} para reprocessar...`);
 
       try {
-        const dataAtual = new Date();
-        const dataListaJoia = new Date(dataAtual.getFullYear(), dataAtual.getMonth(), diaDigitado, 0, 0, 0, 0);
+        // 🔥 FIX FUSO: Constrói a data de busca e gera o intervalo rígido no fuso de Brasília
+        const dataAlvo = this.calcularDataAlvoSegura(diaDigitado);
+        
+        const inicioDia = new Date(dataAlvo);
+        inicioDia.setHours(0, 0, 0, 0);
+        const fimDia = new Date(dataAlvo);
+        fimDia.setHours(23, 59, 59, 999);
 
-        const ano = dataListaJoia.getFullYear();
-        const mes = String(dataListaJoia.getMonth() + 1).padStart(2, '0');
-        const dia = String(dataListaJoia.getDate()).padStart(2, '0');
-        const dataListaIsoPura = `${ano}-${mes}-${dia}`;
-
+        // Busca utilizando BETWEEN nativo (Elimina o problema de fuso do CONVERT_TZ/DAY)
         const listaJoiaEncontrada = await AppDataSource.getRepository('ListaJoia')
           .createQueryBuilder("lista")
-          .where("DATE(lista.dia) = :dataListaIsoPura", { dataListaIsoPura })
+          .where("lista.dia BETWEEN :inicioDia AND :fimDia", { inicioDia, fimDia })
+          .orderBy("lista.dia", "DESC") 
           .getOne();
 
         if (!listaJoiaEncontrada) {
-          await this.enviarMensagemElegante(this.grupoId, "ERRO", `🚫 Não localizei nenhuma lista de joinhas registrada no dia *${dia}/${mes}*.`);
+          await this.enviarMensagemElegante(this.grupoId, "ERRO", `🚫 Não localizei nenhuma lista registrada no dia *${diaDigitado.toString().padStart(2, '0')}*.`);
           return true;
         }
 
@@ -612,7 +647,7 @@ export class WhatsAppController {
       return true;
     }
 
-    // COMANDO ADMINISTRATIVO: @escala_tarde [dia_do_joinha]
+    // COMANDO ADMINISTRATIVO: @escala_tarde [dia_operacional]
     if (acao === '@escala_tarde') {
       const diaDigitado = parseInt(parametro, 10);
 
@@ -622,7 +657,6 @@ export class WhatsAppController {
       }
 
       try {
-        // Blindagem de calendário: calcula a data segura e extrai o dia real correspondente
         const dataAlvo = this.calcularDataAlvoSegura(diaDigitado);
         const diaReal = dataAlvo.getDate();
 
@@ -634,8 +668,7 @@ export class WhatsAppController {
       return true;
     }
 
-
-    // COMANDO ADMINISTRATIVO: @escala_madrugada [dia_do_joinha]
+    // COMANDO ADMINISTRATIVO: @escala_madrugada [dia_operacional]
     if (acao === '@escala_madrugada') {
       const diaDigitado = parseInt(parametro, 10);
 
@@ -645,7 +678,6 @@ export class WhatsAppController {
       }
 
       try {
-        // Blindagem de calendário: calcula a data segura e extrai o dia real correspondente
         const dataAlvo = this.calcularDataAlvoSegura(diaDigitado);
         const diaReal = dataAlvo.getDate();
 
@@ -657,7 +689,7 @@ export class WhatsAppController {
       return true;
     }
 
-    // COMANDO ADMINISTRATIVO: @escala_completa [dia_do_joinha]
+    // COMANDO ADMINISTRATIVO: @escala_completa [dia_operacional]
     if (acao === '@escala_completa') {
       const diaDigitado = parseInt(parametro, 10);
 
@@ -667,7 +699,6 @@ export class WhatsAppController {
       }
 
       try {
-        // Blindagem de calendário: calcula a data segura e extrai o dia real correspondente
         const dataAlvo = this.calcularDataAlvoSegura(diaDigitado);
         const diaReal = dataAlvo.getDate();
 
@@ -684,37 +715,37 @@ export class WhatsAppController {
       return true;
     }
 
-    // COMANDO ADMINISTRATIVO: @escala [dia_do_joinha]
+    // COMANDO ADMINISTRATIVO: @escala [dia_da_geracao]
     if (acao === '@escala') {
       const diaDigitado = parseInt(parametro, 10);
 
       if (isNaN(diaDigitado) || diaDigitado < 1 || diaDigitado > 31) {
-        await this.enviarMensagemElegante(this.grupoId, "ERRO", "❌ Use: `@escala [dia]` (Exemplo: `@escala 7`).");
+        await this.enviarMensagemElegante(this.grupoId, "ERRO", "❌ Use: `@escala [dia]` (Exemplo: `@escala 10`).");
         return true; 
       }
 
-      await this.enviarMensagemElegante(this.grupoId, "SISTEMA", `🔄 Processando a escala para o dia *${diaDigitado.toString().padStart(2, '0')}*...`);
+      await this.enviarMensagemElegante(this.grupoId, "SISTEMA", `🔄 Buscando a lista gerada no dia *${diaDigitado.toString().padStart(2, '0')}*...`);
       try {
-        const dataAtual = new Date();
-        const dataListaJoia = new Date(dataAtual.getFullYear(), dataAtual.getMonth(), diaDigitado, 0, 0, 0, 0);
+        // 🔥 FIX FUSO DEFINITIVO: Converte o dia informado em uma data segura baseada no fuso de São Paulo
+        const dataAlvo = this.calcularDataAlvoSegura(diaDigitado);
+        
+        const inicioDia = new Date(dataAlvo);
+        inicioDia.setHours(0, 0, 0, 0);
+        const fimDia = new Date(dataAlvo);
+        fimDia.setHours(23, 59, 59, 999);
 
-        const ano = dataListaJoia.getFullYear();
-        const mes = String(dataListaJoia.getMonth() + 1).padStart(2, '0');
-        const dia = String(dataListaJoia.getDate()).padStart(2, '0');
-        const dataListaIsoPura = `${ano}-${mes}-${dia}`;
-
-        // Localiza a lista de joinhas correspondente no repositório
+        // Executa a busca utilizando ranges puros. Se digitou 10, busca entre 10/xx 00:00 e 10/xx 23:59.
         const listaJoiaEncontrada = await AppDataSource.getRepository('ListaJoia')
           .createQueryBuilder("lista")
-          .where("DATE(lista.dia) = :dataListaIsoPura", { dataListaIsoPura })
+          .where("lista.dia BETWEEN :inicioDia AND :fimDia", { inicioDia, fimDia })
+          .orderBy("lista.dia", "DESC")
           .getOne();
 
         if (!listaJoiaEncontrada) {
-          await this.enviarMensagemElegante(this.grupoId, "ERRO", `🚫 Não localizei nenhuma lista de joinhas registrada no dia *${dia}/${mes}*.`);
+          await this.enviarMensagemElegante(this.grupoId, "ERRO", `🚫 Não localizei nenhuma lista registrada no dia *${diaDigitado.toString().padStart(2, '0')}*.`);
           return true; 
         }
 
-        // Dispara a geração molecular e o relatório do WhatsApp
         const relatorioFormatado = await this.escalaService.gerarEscalaCompleta((listaJoiaEncontrada as any).id);
         await this.enviarMensagemElegante(this.grupoId, "📋 ESCALA ATUALIZADA", relatorioFormatado);
 
@@ -725,8 +756,9 @@ export class WhatsAppController {
       return true; 
     }
 
-    return false; 
+    return false; // Permite que a mensagem caia no fluxo de comandos de usuários comuns
   }
+
 
 
   private async enviarMensagemElegante(to: string | undefined, titulo: string, conteudo: string): Promise<void> { 
