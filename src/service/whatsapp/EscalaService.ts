@@ -382,7 +382,7 @@ static async obterMotoristaApoioEscalaMae(ano: number, mes: number, dia: number)
 
         if (contadorPlantao <= limitePlantao) {
           if (contadorPlantao === 1) {
-            blocoPlantao.push(`*Plantão até o fim das rotas*\n ${motorista.nome}`);
+            blocoPlantao.push(`*Plantão até o fim das rotas*\n1 ${motorista.nome}`);
           } else {
             blocoPlantao.push(`${contadorPlantao} ${motorista.nome}`);
           }
