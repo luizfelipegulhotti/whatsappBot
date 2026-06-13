@@ -17,10 +17,10 @@ export class Usuario {
     email!: string;
 
     @Column({ unique: true, nullable: true })
-    telefoneWhatsApp?: number;
+    telefoneWhatsApp?: string;
 
     @Column({ unique: true, nullable: true })
-    whatsappLid?: number
+    whatsappLid?: string;
 
     @Column({ select: false })
     senha!: string;

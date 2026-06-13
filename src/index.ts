@@ -69,7 +69,7 @@ async function startApp() {
         // 5. Inicialização do Servidor Express na Rede Local
         const PORTA = 8080; 
         app.listen(PORTA, '0.0.0.0', () => { 
-            console.log(`🌐 Servidor na porta ${PORTA}`); 
+            console.log(`🌐 Servidor conectado na porta ${PORTA}`); 
         }); 
 
     } catch (error) { 
