@@ -17,7 +17,6 @@ import 'dotenv/config';
 import cron, { ScheduledTask } from "node-cron"; 
 import MotoristaService from "../service/MotoristaService"; 
 import { Motorista } from "../models/Motorista";
-import formatarDataIsoPura from '../utils/formatters/formatarDataPorDia';
 import AdministradorService from '../service/AdministradorService';
 
 export class WhatsAppController { 
@@ -40,6 +39,7 @@ export class WhatsAppController {
   ) { 
     this.grupoId = process.env.JWT_ID_GROUPSECRET || ''; 
   }
+
   public async inicializar(): Promise<void> { 
     // Atribuição global imediata para evitar instâncias indefinidas no bootstrap do Pino
     (global as any).whatsappControllerInstance = this;
@@ -57,8 +57,8 @@ export class WhatsAppController {
       }
     }
 
-    // LOGGER INTERCEPTOR: Trava logs e requisições de mapas de rede indesejados
-      const loggerCustomizado = pinoInterno({
+    // LOGGER INTERCEPTOR CORRIGIDO
+    const loggerCustomizado = pinoInterno({
       level: 'debug',
       hooks: {
         logMethod: function (this: any, inputArgs: unknown[], method: (msg: string, ...args: unknown[]) => void): void {
@@ -72,7 +72,6 @@ export class WhatsAppController {
               ? primeiroArg 
               : JSON.stringify(primeiroArg || '');
 
-            // EXCEÇÃO DA TRAVA: Se for o comando de extração de LID, deixa o log passar para a biblioteca processar
             const ehComandoExtrairLid = textoParaChecar.includes('@extrair_lid');
 
             // 2. FILTRO GLOBAL DE MENSAGENS AUTORIZADAS DO SISTEMA
@@ -83,7 +82,6 @@ export class WhatsAppController {
                                         textoParaChecar.includes('👍') ||
                                         ehComandoExtrairLid;
 
-            // Ignora barulhos de sessão e migrações internas da biblioteca Baileys
             if (textoParaChecar.includes('SessionEntry') || textoParaChecar.includes('Closing session') || textoParaChecar.includes('migration')) {
               return;
             }
@@ -101,12 +99,14 @@ export class WhatsAppController {
                                 logData.fromJid ||
                                 logData.lidUser;
               
-              // TRAVA DE GRUPO MODIFICADA: Se não for permitido, mas for o comando de extração, ignora o bloqueio
-              if (remoteJid && !controlador.IDs_PERMITIDOS.includes(remoteJid) && !ehComandoExtrairLid) {
+              // 📋 CORREÇÃO DE SEGURANÇA PARA AUTOTESTE: 
+              // Deixa o fluxo passar se o remoteJid for de usuário individual (@s.whatsapp.net), impedindo que o evento morra
+              const ehConversaIndividualPrivada = remoteJid && remoteJid.endsWith('@s.whatsapp.net');
+
+              if (remoteJid && !controlador.IDs_PERMITIDOS.includes(remoteJid) && !ehComandoExtrairLid && !ehConversaIndividualPrivada) {
                 return;
               }
 
-              // VÍNCULO AUTOMÁTICO SEGURO: Só executa se o grupo passar no filtro acima
               if (logData.pnUser && logData.lidUser) {
                 MotoristaService.vincularLidAoTelefone(String(logData.pnUser), String(logData.lidUser)).catch(() => {});
               }
@@ -118,7 +118,6 @@ export class WhatsAppController {
               }
             }
 
-            // 4. TRAVA DE IMPRESSÃO VISUAL: Se o log bruto não contiver os gatilhos do robô, não polui o console
             if (!ehMensagemDoSistema) {
               return; 
             }
@@ -134,9 +133,11 @@ export class WhatsAppController {
       logger: loggerCustomizado, 
       defaultQueryTimeoutMs: undefined,
       browser: ['Mac OS', 'Chrome', '124.0.0.0'], 
-      syncFullHistory: false, // Força o descarte do histórico massivo inicial
+      syncFullHistory: false, 
       markOnlineOnConnect: true
     }); 
+
+    this.sock.ev.on('creds.update', saveCreds);
 
     this.sock.ev.on('connection.update', (update) => { 
       const { connection, lastDisconnect, qr } = update; 
@@ -146,7 +147,6 @@ export class WhatsAppController {
       } 
       if (connection === 'open') { 
         console.log('✅ WhatsApp conectado e pronto para uso via Socket Puro!'); 
-        this.configurarCronjobs(); 
       } 
       if (connection === 'close') { 
         const erroCode = (lastDisconnect?.error as Boom)?.output?.statusCode; 
@@ -164,174 +164,180 @@ export class WhatsAppController {
     this.sock.ev.on('creds.update', saveCreds);
 
     this.sock.ev.on('messages.upsert', async (m: { messages: proto.IWebMessageInfo[] }) => { 
-      for (const msg of m.messages) {
-        if (!msg || !msg.message || !msg.key) continue; 
+        for (const msg of m.messages) {
+            if (!msg || !msg.message || !msg.key) continue; 
 
-         // 1. CHECAGEM DE TEMPO TOLERANTE A QUEDAS (Tolerância estrita de 30 minutos)
-        const timestampOficialSegundos = msg.messageTimestamp ? Number(msg.messageTimestamp) : Math.floor(Date.now() / 1000);
-        const timestampJanelaLimite = Math.floor(Date.now() / 1000) - 1800;
+            // 1. CHECAGEM DE TEMPO TOLERANTE A QUEDAS (Tolerância estrita de 30 minutos)
+            const timestampOficialSegundos = msg.messageTimestamp ? Number(msg.messageTimestamp) : Math.floor(Date.now() / 1000);
+            const timestampJanelaLimite = Math.floor(Date.now() / 1000) - 1800;
 
-        // Se a mensagem tiver sido enviada há mais de 30 minutos, ignora por segurança
-        if (timestampOficialSegundos < timestampJanelaLimite) {
-          continue;
-        }
-
-        const texto = (msg.message.conversation || msg.message.extendedTextMessage?.text || '').trim();
-        const textoLimpo = texto.replace(/[\u2000-\u200B\u2028\u2029\uFEFF]/g, '').trim();
-        const chatDeOrigemId = msg.key.remoteJid || '';
-
-        // Extração unificada das identidades dos emissores (Sua lógica original intocada)
-        const autorRaw = msg.key.participant || msg.key.remoteJid || ''; 
-        const partesJid = autorRaw.replace(/:[0-9]+/, '').split('@');
-        const autorLid = partesJid[0]; 
-        if (!autorLid) continue;
-
-        // =========================================================================
-        // INTERCEPTADORES GLOBAIS DE EXTRAÇÃO (IGNORAM IDs_PERMITIDOS)
-        // =========================================================================
-        if (textoLimpo.startsWith('@extrair_lid_usuario')) {
-          const ehAdmin = await this.registroService.verificarSeEhAdmin(autorLid, this.sock!);
-          if (!ehAdmin) continue; 
-
-          let idDesejadoPuro = '';
-          const termoNomeBuscado = textoLimpo.replace(/^@extrair_lid_usuario\s+/i, '').replace(/@/g, '').trim().toLowerCase();
-
-          if (!termoNomeBuscado) {
-            await this.sock!.sendMessage(chatDeOrigemId, {
-              text: `*SISTEMA*\n\n❌ *Informe o nome do perfil para pesquisar.*\n\n💡 Exemplo: \`@extrair_lid_usuario Nome do Motorista\``
-            });
-            continue;
-          }
-
-          if (chatDeOrigemId.endsWith('@g.us')) {
-            try {
-              const metadadosDoGrupo = await this.sock!.groupMetadata(chatDeOrigemId);
-              if (metadadosDoGrupo && metadadosDoGrupo.participants) {
-                const membroLocalizado = metadadosDoGrupo.participants.find(integrante => {
-                  const nomeNoPerfil = String((integrante as any).name || (integrante as any).notify || '').toLowerCase();
-                  return nomeNoPerfil.includes(termoNomeBuscado) || integrante.id.includes(termoNomeBuscado);
-                });
-
-                if (membroLocalizado) {
-                  idDesejadoPuro = membroLocalizado.id.replace(/:[0-9]+/, '').split('@')[0];
-                }
-              }
-            } catch (erroMembros) {
-              console.error("[ERRO REQUISIÇÃO METADADOS GRUPO]", erroMembros);
+            if (timestampOficialSegundos < timestampJanelaLimite) {
+                continue;
             }
-          }
 
-          if (!idDesejadoPuro) {
-            await this.sock!.sendMessage(chatDeOrigemId, {
-              text: `*SISTEMA*\n\n❌ *Não encontrei nenhum integrante com o nome "${termoNomeBuscado}" neste grupo.*`
-            });
-            continue;
-          }
+            const texto = (msg.message.conversation || msg.message.extendedTextMessage?.text || '').trim();
+            const textoLimpo = texto.replace(/[\u2000-\u200B\u2028\u2029\uFEFF]/g, '').trim();
+            
+            // Captura o chat dinâmico atual (pode ser o grupo ou o seu chat privado)
+            const chatDeOrigemId = msg.key.remoteJid || '';
 
-          console.log('\n==================================================');
-          console.log(`👤 [LID DE MOTORISTA ENCONTRADO] Chat: ${chatDeOrigemId}`);
-          console.log(`📌 LID DO USUÁRIO EXTRAÍDO: ${idDesejadoPuro}`);
-          console.log('==================================================\n');
+            // Identifica se a mensagem veio de você mesmo
+            let autorRaw = msg.key.participant || msg.key.remoteJid || ''; 
+            if (msg.key.fromMe && this.sock?.user?.id) {
+                autorRaw = this.sock.user.id;
+            }
 
-          await this.sock!.sendMessage(chatDeOrigemId, {
-            text: `*SISTEMA*\n\n👤 *LID do usuário localizado!*\n\n📌 ID Puro: \`${idDesejadoPuro}\`\n🧩 JID Completo: \`${idDesejadoPuro}@lid\``
-          });
-          continue; 
+            const partesJid = autorRaw.replace(/:[0-9]+/, '').split('@');
+            const autorLid = partesJid[0]; 
+            if (!autorLid) continue;
+
+            // =========================================================================
+            // INTERCEPTADORES GLOBAIS DE EXTRAÇÃO (IGNORAM IDs_PERMITIDOS)
+            // =========================================================================
+            if (textoLimpo.startsWith('@extrair_lid_usuario')) {
+                const ehAdmin = await this.registroService.verificarSeEhAdmin(autorLid, this.sock!);
+                if (!ehAdmin) continue; 
+
+                let idDesejadoPuro = '';
+                const termoNomeBuscado = textoLimpo.replace(/^@extrair_lid_usuario\s+/i, '').replace(/@/g, '').trim().toLowerCase();
+
+                if (!termoNomeBuscado) {
+                    await this.sock!.sendMessage(chatDeOrigemId, {
+                        text: `*SISTEMA*\n\n❌ *Informe o nome do perfil para pesquisar.*\n\n💡 Exemplo: \`@extrair_lid_usuario Nome do Motorista\``
+                    });
+                    continue;
+                }
+
+                if (chatDeOrigemId.endsWith('@g.us')) {
+                    try {
+                        const metadadosDoGrupo = await this.sock!.groupMetadata(chatDeOrigemId);
+                        if (metadadosDoGrupo && metadadosDoGrupo.participants) {
+                            const membroLocalizado = metadadosDoGrupo.participants.find(integrante => {
+                                const nomeNoPerfil = String((integrante as any).name || (integrante as any).notify || '').toLowerCase();
+                                return nomeNoPerfil.includes(termoNomeBuscado) || integrante.id.includes(termoNomeBuscado);
+                            });
+
+                            if (membroLocalizado) {
+                                idDesejadoPuro = membroLocalizado.id.replace(/:[0-9]+/, '').split('@')[0];
+                            }
+                        }
+                    } catch (erroMembros) {
+                        console.error("[ERRO REQUISIÇÃO METADADOS GRUPO]", erroMembros);
+                    }
+                }
+
+                if (!idDesejadoPuro) {
+                    await this.sock!.sendMessage(chatDeOrigemId, {
+                        text: `*SISTEMA*\n\n❌ *Não encontrei nenhum integrante com o nome "${termoNomeBuscado}" neste grupo.*`
+                    });
+                    continue;
+                }
+
+                console.log('\n==================================================');
+                console.log(`👤 [LID DE MOTORISTA ENCONTRADO] Chat: ${chatDeOrigemId}`);
+                console.log(`📌 LID DO USUÁRIO EXTRAÍDO: ${idDesejadoPuro}`);
+                console.log('==================================================\n');
+
+                await this.sock!.sendMessage(chatDeOrigemId, {
+                    text: `*SISTEMA*\n\n👤 *LID do usuário localizado!*\n\n📌 ID Puro: \`${idDesejadoPuro}\`\n🧩 JID Completo: \`${idDesejadoPuro}@lid\``
+                });
+                continue; 
+            }
+
+            if (textoLimpo === '@extrair_lid') {
+                const ehAdmin = await this.registroService.verificarSeEhAdmin(autorLid, this.sock!);
+                if (!ehAdmin) continue; 
+
+                console.log('\n==================================================');
+                console.log('🔍 [EXTRAÇÃO DE LID DO GRUPO] Sucesso:');
+                console.log(`📌 LID/JID DO CHAT: ${chatDeOrigemId}`);
+                console.log('==================================================\n');
+
+                await this.sock!.sendMessage(chatDeOrigemId, {
+                    text: `*SISTEMA*\n\n✅ *LID do Grupo extraído com sucesso!*\n\n📌 ID: \`${chatDeOrigemId}\``
+                });
+                continue; 
+            }
+
+            // =========================================================================
+            // REGRAS DE NEGÓCIO DIÁRIAS (PERMITE PASSAR SE FOR OS IDs_PERMITIDOS OU SE FOR SEU PRÓPRIO CHAT)
+            // =========================================================================
+            if (!this.IDs_PERMITIDOS.includes(chatDeOrigemId) && !msg.key.fromMe) continue; 
+
+            // Captura e vinculação do número de telefone em tempo real
+            let foneRealMapeado = msg.key.participant || msg.message?.extendedTextMessage?.contextInfo?.participant || '';
+            
+            if (msg.key.fromMe && this.sock?.user?.id) {
+                foneRealMapeado = this.sock.user.id;
+            }
+
+            if (foneRealMapeado && String(foneRealMapeado).includes('@s.whatsapp.net')) {
+                const fonePuro = String(foneRealMapeado).split('@')[0].replace(/\D/g, '');
+                await MotoristaService.vincularLidAoTelefone(fonePuro, autorLid).catch(() => {});
+                await AdministradorService.vincularLidAoTelefone(fonePuro, autorLid).catch(() => {});
+            }
+
+            const timestampOficialMs = timestampOficialSegundos * 1000;
+
+            try { 
+                // Cadastro Híbrido de Motoristas
+                if (textoLimpo.startsWith('@cadastrar ')) { 
+                    if (!this.cadastroAberto) { 
+                        // CORREÇÃO: Responde no chat atual (chatDeOrigemId) e não no grupo fixo
+                        await this.enviarMensagemElegante(chatDeOrigemId, "CADASTRO", "🔒 O cadastro está fechado."); 
+                        continue; 
+                    } 
+                    const nome = textoLimpo.replace('@cadastrar ', '').trim(); 
+                    await this.registroService.cadastrarMotorista(nome, autorLid, this.sock!); 
+                    // CORREÇÃO: Responde no chat atual (chatDeOrigemId)
+                    await this.enviarMensagemElegante(chatDeOrigemId, "CADASTRO", `✅ *${nome}*, cadastrado com sucesso!`); 
+                    continue; 
+                } 
+
+                // EXECUÇÃO DO MÉTODO DE COMANDOS ADMIN
+                if (textoLimpo.startsWith('@')) { 
+                    const processado = await this.processarComandosAdmin(msg, textoLimpo, autorLid); 
+                    if (processado) continue; 
+                } 
+
+                // Tratamento da Janela de Bloqueio / Largada Queimada
+                if (this.isJanelaBanimento(timestampOficialMs)) { 
+                    const lista = await this.registroService.buscarOuCriarListaDoDia(); 
+                    if (EmojiHelper.isJoinha(textoLimpo)) { 
+                        await this.registroService.adicionarJoinhaPenalizado(autorLid, lista.id, this.sock!, timestampOficialMs); 
+                    } else { 
+                        await this.registroService.registrarBanimentoAntecipado(autorLid, this.sock!); 
+                    } 
+                    continue;
+                } 
+
+                // Tratamento da Janela Regulamentar de Confirmação de Presença
+                if (this.isJanelaJoinha(timestampOficialMs)) { 
+                    if (EmojiHelper.isJoinha(textoLimpo)) { 
+                        const lista = await this.registroService.buscarOuCriarListaDoDia(); 
+                        let motorista = await MotoristaService.buscarPorLid(autorLid); 
+
+                        if (motorista) { 
+                            const dataHoje = this.registroService['obterDataHoje'](); 
+                            const banidoHoje = await AppDataSource.getRepository(require("../models/Banimento").Banimento).findOneBy({ 
+                                motorista: { id: motorista.id }, 
+                                dia: dataHoje 
+                            }) as Record<string, unknown> | null;
+
+                            if (banidoHoje) {
+                                // CORREÇÃO: Responde no chat atual (chatDeOrigemId)
+                                await this.enviarMensagemElegante(chatDeOrigemId, "AVISO", `⚠️ @${autorLid}, você está impedido de bater o joinha hoje.`);
+                                continue;
+                            }
+
+                            await this.registroService.adicionarJoinha(autorLid, lista.id, this.sock!, timestampOficialMs);
+                        }
+                    }
+                } 
+            } catch (err: any) {
+                console.error("❌ Falha crítica no loop interno:", err.message);
+            }
         }
-
-        if (textoLimpo === '@extrair_lid') {
-          const ehAdmin = await this.registroService.verificarSeEhAdmin(autorLid, this.sock!);
-          if (!ehAdmin) continue; 
-
-          console.log('\n==================================================');
-          console.log('🔍 [EXTRAÇÃO DE LID DO GRUPO] Sucesso:');
-          console.log(`📌 LID/JID DO CHAT: ${chatDeOrigemId}`);
-          console.log('==================================================\n');
-
-          await this.sock!.sendMessage(chatDeOrigemId, {
-            text: `*SISTEMA*\n\n✅ *LID do Grupo extraído com sucesso!*\n\n📌 ID: \`${chatDeOrigemId}\``
-          });
-          continue; 
-        }
-
-        // =========================================================================
-        // REGRAS DE NEGÓCIO DIÁRIAS (RESTRITAS AOS IDs_PERMITIDOS)
-        // =========================================================================
-        if (!this.IDs_PERMITIDOS.includes(chatDeOrigemId)) continue; 
-
-        // Captura e vinculação do número de telefone em tempo real
-                // Captura e vinculação do número de telefone (Híbrido: Suporta Dono e Terceiros)
-        let foneRealMapeado = msg.key.participant || msg.message?.extendedTextMessage?.contextInfo?.participant || '';
-        
-        // CORREÇÃO CRÍTICA PARA VOCÊ (O DONO): Se a mensagem é sua, o WhatsApp esconde o telefone na rede.
-        // Nós forçamos o robô a usar o número de telefone da sua própria conexão atual!
-        if (msg.key.fromMe && this.sock?.user?.id) {
-          foneRealMapeado = this.sock.user.id;
-        }
-
-        if (foneRealMapeado && String(foneRealMapeado).includes('@s.whatsapp.net')) {
-          const fonePuro = String(foneRealMapeado).split('@')[0].replace(/\D/g, '');
-          
-          // O robô dispara o atualizador para as duas tabelas. 
-          // O serviço de administrador vai achar o seu telefone "554497328923" e gravar o seu LID na hora!
-          await MotoristaService.vincularLidAoTelefone(fonePuro, autorLid).catch(() => {});
-          await AdministradorService.vincularLidAoTelefone(fonePuro, autorLid).catch(() => {});
-        }
-
-
-        const timestampOficialMs = timestampOficialSegundos * 1000;
-
-        try { 
-          // Cadastro Híbrido de Motoristas
-          if (textoLimpo.startsWith('@cadastrar ')) { 
-            if (!this.cadastroAberto) { 
-              await this.enviarMensagemElegante(this.grupoId, "CADASTRO", "🔒 O cadastro está fechado."); 
-              continue; 
-            } 
-            const nome = textoLimpo.replace('@cadastrar ', '').trim(); 
-            await this.registroService.cadastrarMotorista(nome, autorLid, this.sock!); 
-            await this.enviarMensagemElegante(this.grupoId, "CADASTRO", `✅ *${nome}*, cadastrado com sucesso!`); 
-            continue; 
-          } 
-
-          // EXECUÇÃO DO MÉTODO DE COMANDOS ADMIN: Encaminha explicitamente a string limpa e padronizada
-          if (textoLimpo.startsWith('@')) { 
-            const processado = await this.processarComandosAdmin(msg, textoLimpo, autorLid); 
-            if (processado) continue; 
-          } 
-
-          // Tratamento da Janela de Bloqueio / Largada Queimada
-          if (this.isJanelaBanimento(timestampOficialMs)) { 
-            const lista = await this.registroService.buscarOuCriarListaDoDia(); 
-            if (EmojiHelper.isJoinha(textoLimpo)) { 
-              await this.registroService.adicionarJoinhaPenalizado(autorLid, lista.id, this.sock!, timestampOficialMs); 
-            } else { 
-              await this.registroService.registrarBanimentoAntecipado(autorLid, this.sock!); 
-            } 
-            continue;
-          } 
-
-          // Tratamento da Janela Regulamentar de Confirmação de Presença
-          if (this.isJanelaJoinha(timestampOficialMs)) { 
-            if (EmojiHelper.isJoinha(textoLimpo)) { 
-              const lista = await this.registroService.buscarOuCriarListaDoDia(); 
-              let motorista = await MotoristaService.buscarPorLid(autorLid); 
-
-              if (motorista) { 
-                const dataHoje = this.registroService['obterDataHoje'](); 
-                const banidoHoje = await AppDataSource.getRepository(require("../models/Banimento").Banimento).findOneBy({ 
-                  motorista: { id: motorista.id }, 
-                  dia: dataHoje 
-                }) as Record<string, unknown> | null; 
-                if (banidoHoje) continue; 
-              } 
-              await this.registroService.adicionarJoinha(autorLid, lista.id, this.sock!, timestampOficialMs); 
-            } 
-          } 
-        } catch (error: unknown) { 
-          console.error(`[ERRO CRÍTICO EXECUÇÃO BOT]: ${(error as Error).message}`); 
-        } 
-      }
     });
   }
 
@@ -391,9 +397,11 @@ export class WhatsAppController {
     this.tarefasAtivas = [];
   }
  
-
 private async processarComandosAdmin(msg: proto.IWebMessageInfo, comando: string, autorLid: string): Promise<boolean> { 
-    // 1. Validação de Segurança de Administrador
+    // 1. CAPTURA DINÂMICA DO CHAT ATUAL (Pode ser o grupo OU o seu chat privado)
+    const chatDeOrigemId = msg.key!.remoteJid || '';
+    if (!chatDeOrigemId) return false;
+    // 2. Validação de Segurança de Administrador
     const isAdmin = await this.registroService.verificarSeEhAdmin(autorLid, this.sock!); 
     if (!isAdmin) return false; 
 
@@ -406,24 +414,27 @@ private async processarComandosAdmin(msg: proto.IWebMessageInfo, comando: string
     if (acao === '@motoristas') { 
       const motoristas = await MotoristaService.listarMotoristas(); 
       if (!motoristas || motoristas.length === 0) { 
-        await this.enviarMensagemElegante(this.grupoId, "MOTORISTAS", "📭 Nenhum motorista cadastrado."); 
+        // CORREÇÃO: Alinhado para chatDeOrigemId
+        await this.enviarMensagemElegante(chatDeOrigemId, "MOTORISTAS", "📭 Nenhum motorista cadastrado."); 
         return true; 
       } 
       let relatorio = ""; 
       motoristas.forEach((m, i) => { 
         relatorio += `${i + 1}. *${m.nome}*\n🆔 ${m.whatsAppLid || 'Aguardando interação'} ${m.ativo ? "✅" : "🚫"}\n\n`; 
       }); 
-      await this.enviarMensagemElegante(this.grupoId, "👥 LISTA DE MOTORISTAS", relatorio); 
+      // CORREÇÃO: Alinhado para chatDeOrigemId
+      await this.enviarMensagemElegante(chatDeOrigemId, "👥 LISTA DE MOTORISTAS", relatorio); 
       return true; 
     } 
 
     // COMANDO ADMINISTRATIVO: @abrir_cadastro
     if (acao === '@abrir_cadastro') { 
       this.cadastroAberto = true; 
+      // CORREÇÃO: Alinhado para chatDeOrigemId
       await this.enviarMensagemElegante(
-        this.grupoId, 
+        chatDeOrigemId, 
         "CADASTRO LIBERADO", 
-        "🔓 *CADASTRO LIBERADO!*\n\n Digite:\n*@cadastrar Seu Nome Aqui*"
+        "🔓 *CADASTRO LIBERADO!*\n\n Digite:\n*@cadastrar Seu Nome Here*"
       ); 
       return true; 
     } 
@@ -431,8 +442,9 @@ private async processarComandosAdmin(msg: proto.IWebMessageInfo, comando: string
     // COMANDO ADMINISTRATIVO: @fechar_cadastro
     if (acao === '@fechar_cadastro') { 
       this.cadastroAberto = false; 
+      // CORREÇÃO: Alinhado para chatDeOrigemId
       await this.enviarMensagemElegante(
-        this.grupoId, 
+        chatDeOrigemId, 
         "CADASTRO FECHADO", 
         "🔒 *CADASTRO FECHADO!*\n\n🚫 Aguarde a liberação pelo adm para se cadastrar novamente."
       );
@@ -443,14 +455,17 @@ private async processarComandosAdmin(msg: proto.IWebMessageInfo, comando: string
     if (acao === '@tipo_dia') { 
       const tipoInformado = partes[2]; 
       if (!parametro || !tipoInformado) { 
-        await this.enviarMensagemElegante(this.grupoId, "ERRO", "❌ Use: `@tipo_dia DD/MM/AAAA DIA_LIVRE`."); 
+        // CORREÇÃO: Alinhado para chatDeOrigemId
+        await this.enviarMensagemElegante(chatDeOrigemId, "ERRO", "❌ Use: `@tipo_dia DD/MM/AAAA DIA_LIVRE`."); 
         return true; 
       } 
       try { 
         await this.escalaService.definirTipoDiaManual(parametro, tipoInformado as 'DIA_LIVRE' | 'DIA_COMUM'); 
-        await this.enviarMensagemElegante(this.grupoId, "CONFIGURAÇÃO", `✅ Feriado/Dia configurado.`); 
+        // CORREÇÃO: Alinhado para chatDeOrigemId
+        await this.enviarMensagemElegante(chatDeOrigemId, "CONFIGURAÇÃO", `✅ Feriado/Dia configurado.`); 
       } catch (error: unknown) { 
-        await this.enviarMensagemElegante(this.grupoId, "ERRO", (error as Error).message); 
+        // CORREÇÃO: Alinhado para chatDeOrigemId
+        await this.enviarMensagemElegante(chatDeOrigemId, "ERRO", (error as Error).message); 
       } 
       return true; 
     } 
@@ -458,20 +473,24 @@ private async processarComandosAdmin(msg: proto.IWebMessageInfo, comando: string
     // COMANDO ADMINISTRATIVO: @limpar_dia [DD/MM/AAAA]
     if (acao === '@limpar_dia') { 
       if (!parametro) {
-        await this.enviarMensagemElegante(this.grupoId, "ERRO", "❌ Informe a data: `@limpar_dia DD/MM/AAAA`.");
+        // CORREÇÃO: Alinhado para chatDeOrigemId
+        await this.enviarMensagemElegante(chatDeOrigemId, "ERRO", "❌ Informe a data: `@limpar_dia DD/MM/AAAA`.");
         return true; 
       }
       await this.escalaService.removerTipoDiaManual(parametro); 
-      await this.enviarMensagemElegante(this.grupoId, "CONFIGURAÇÃO", `✅ Marcação removida.`); 
+      // CORREÇÃO: Alinhado para chatDeOrigemId
+      await this.enviarMensagemElegante(chatDeOrigemId, "CONFIGURAÇÃO", `✅ Marcação removida.`); 
       return true; 
     } 
 
     // COMANDO ADMINISTRATIVO: @listar_feriados
     if (acao === '@listar_feriados') { 
       const lista = await this.escalaService.listarDiasManuais(); 
-      await this.enviarMensagemElegante(this.grupoId, "📅 FERIADOS", lista); 
+      // CORREÇÃO: Alinhado para chatDeOrigemId
+      await this.enviarMensagemElegante(chatDeOrigemId, "📅 FERIADOS", lista); 
       return true; 
     }
+
     // Captura de Menções / Contexto do WhatsApp (Baileys)
     const listaMencoes = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid; 
     const mencionadoJid = listaMencoes && listaMencoes.length > 0 ? listaMencoes[0] : null; 
@@ -484,13 +503,15 @@ private async processarComandosAdmin(msg: proto.IWebMessageInfo, comando: string
 
         if (lidMencionado) { 
           await this.registroService.adicionarMotoristaManualmente(lidMencionado, lista.id, this.sock!); 
-          await this.enviarMensagemElegante(this.grupoId, "SUCESSO", `✅ Adicionado por menção.`); 
+          // CORREÇÃO: Alinhado para chatDeOrigemId
+          await this.enviarMensagemElegante(chatDeOrigemId, "SUCESSO", `✅ Adicionado por menção.`); 
           return true; 
         } 
 
         const textoSemAcao = comando.replace(/@add\s+/i, '').trim();
         if (!textoSemAcao) {
-          await this.enviarMensagemElegante(this.grupoId, "ERRO", `❌ Marque um usuário ou digite o nome: \`@add Nome\``);
+          // CORREÇÃO: Alinhado para chatDeOrigemId
+          await this.enviarMensagemElegante(chatDeOrigemId, "ERRO", `❌ Marque um usuário ou digite o nome: \`@add Nome\``);
           return true;
         }
 
@@ -500,13 +521,16 @@ private async processarComandosAdmin(msg: proto.IWebMessageInfo, comando: string
 
         if (motoristaPorNome) {
           await this.registroService.adicionarMotoristaManualmente(motoristaPorNome.whatsAppLid || '', lista.id, this.sock!);
-          await this.enviarMensagemElegante(this.grupoId, "SUCESSO", `✅ Adicionado motorista: *${motoristaPorNome.nome}*.`);
+          // CORREÇÃO: Alinhado para chatDeOrigemId
+          await this.enviarMensagemElegante(chatDeOrigemId, "SUCESSO", `✅ Adicionado motorista: *${motoristaPorNome.nome}*.`);
         } else {
-          await this.enviarMensagemElegante(this.grupoId, "AVISO", `❌ Motorista não encontrado por nome ou menção.`);
+          // CORREÇÃO: Alinhado para chatDeOrigemId
+          await this.enviarMensagemElegante(chatDeOrigemId, "AVISO", `❌ Motorista não encontrado por nome ou menção.`);
         }
       } catch (error: unknown) {
         console.error(`[ERRO @add]:`, error);
-        await this.enviarMensagemElegante(this.grupoId, "ERRO", `❌ Falha ao adicionar: ${(error as Error).message}`);
+        // CORREÇÃO: Alinhado para chatDeOrigemId
+        await this.enviarMensagemElegante(chatDeOrigemId, "ERRO", `❌ Falha ao adicionar: ${(error as Error).message}`);
       } 
       return true; 
     } 
@@ -515,7 +539,8 @@ private async processarComandosAdmin(msg: proto.IWebMessageInfo, comando: string
     if (acao === '@inserir') { 
       const partesCmd = comando.split(' posição '); 
       if (!lidMencionado || partesCmd.length <= 1) {
-        await this.enviarMensagemElegante(this.grupoId, "ERRO", "❌ Mencione o motorista. Uso: `@inserir @Contato posição X [dia]`");
+        // CORREÇÃO: Alinhado para chatDeOrigemId
+        await this.enviarMensagemElegante(chatDeOrigemId, "ERRO", "❌ Mencione o motorista. Uso: `@inserir @Contato posição X [dia]`");
         return true;
       }
 
@@ -523,7 +548,8 @@ private async processarComandosAdmin(msg: proto.IWebMessageInfo, comando: string
       const numerosMatch = restoTexto.match(/^(\d+)(?:\s+(\d+))?$/);
 
       if (!numerosMatch) {
-        await this.enviarMensagemElegante(this.grupoId, "ERRO", "❌ Formato numérico inválido. Use: `@inserir @Contato posição X [dia]`");
+        // CORREÇÃO: Alinhado para chatDeOrigemId
+        await this.enviarMensagemElegante(chatDeOrigemId, "ERRO", "❌ Formato numérico inválido. Use: `@inserir @Contato posição X [dia]`");
         return true;
       }
 
@@ -535,9 +561,11 @@ private async processarComandosAdmin(msg: proto.IWebMessageInfo, comando: string
         await this.registroService.inserirEmPosicaoEspecifica(lidMencionado, dataAlvo, posicao); 
         
         const dataFormatada = `${dataAlvo.getDate().toString().padStart(2, '0')}/${(dataAlvo.getMonth() + 1).toString().padStart(2, '0')}`;
-        await this.enviarMensagemElegante(this.grupoId, "SUCESSO", `✅ Inserido na posição ${posicao} da lista do dia ${dataFormatada}.`); 
+        // CORREÇÃO: Alinhado para chatDeOrigemId
+        await this.enviarMensagemElegante(chatDeOrigemId, "SUCESSO", `✅ Inserido na posição ${posicao} da lista do dia ${dataFormatada}.`); 
       } catch (error: unknown) {
-        await this.enviarMensagemElegante(this.grupoId, "ERRO", `❌ ${(error as Error).message}`);
+        // CORREÇÃO: Alinhado para chatDeOrigemId
+        await this.enviarMensagemElegante(chatDeOrigemId, "ERRO", `❌ ${(error as Error).message}`);
       } 
       return true; 
     } 
@@ -545,7 +573,8 @@ private async processarComandosAdmin(msg: proto.IWebMessageInfo, comando: string
     // COMANDO ADMINISTRATIVO: @remover @Contato [dia]
     if (acao === '@remover') { 
       if (!lidMencionado) {
-        await this.enviarMensagemElegante(this.grupoId, "ERRO", "❌ Identificação ausente. Por favor, marque o motorista.");
+        // CORREÇÃO: Alinhado para chatDeOrigemId
+        await this.enviarMensagemElegante(chatDeOrigemId, "ERRO", "❌ Identificação ausente. Por favor, marque o motorista.");
         return true;
       }
 
@@ -557,9 +586,11 @@ private async processarComandosAdmin(msg: proto.IWebMessageInfo, comando: string
         await this.registroService.removerMotoristaDaLista(lidMencionado, dataAlvo); 
 
         const dataFormatada = `${dataAlvo.getDate().toString().padStart(2, '0')}/${(dataAlvo.getMonth() + 1).toString().padStart(2, '0')}`;
-        await this.enviarMensagemElegante(this.grupoId, "SUCESSO", `✅ Removido com sucesso da lista do dia ${dataFormatada}.`); 
+        // CORREÇÃO: Alinhado para chatDeOrigemId
+        await this.enviarMensagemElegante(chatDeOrigemId, "SUCESSO", `✅ Removido com sucesso da lista do dia ${dataFormatada}.`); 
       } catch (error: unknown) { 
-        await this.enviarMensagemElegante(this.grupoId, "ERRO", `❌ ${(error as Error).message}`);
+        // CORREÇÃO: Alinhado para chatDeOrigemId
+        await this.enviarMensagemElegante(chatDeOrigemId, "ERRO", `❌ ${(error as Error).message}`);
       } 
       return true; 
     }
@@ -567,24 +598,29 @@ private async processarComandosAdmin(msg: proto.IWebMessageInfo, comando: string
     // COMANDO ADMINISTRATIVO: @ativar ou @inativar
     if (acao === '@ativar' || acao === '@inativar') { 
       if (!lidMencionado) {
-        await this.enviarMensagemElegante(this.grupoId, "ERRO", "❌ Identificação ausente. Marque o motorista.");
+        // CORREÇÃO: Alinhado para chatDeOrigemId
+        await this.enviarMensagemElegante(chatDeOrigemId, "ERRO", "❌ Identificação ausente. Marque o motorista.");
         return true; 
       }
       try {
         const motorista = await MotoristaService.buscarPorLid(lidMencionado); 
         if (!motorista) {
-          await this.enviarMensagemElegante(this.grupoId, "ERRO", "❌ Motorista não encontrado no banco de dados.");
+          // CORREÇÃO: Alinhado para chatDeOrigemId
+          await this.enviarMensagemElegante(chatDeOrigemId, "ERRO", "❌ Motorista não encontrado no banco de dados.");
           return true; 
         }
         const novoStatus = acao === '@ativar'; 
         await MotoristaService.alterarStatusAtivo(motorista.whatsAppLid || '', novoStatus); 
-        await this.enviarMensagemElegante(this.grupoId, "STATUS", `👤 O motorista *${motorista.nome}* foi alterado para: ${novoStatus ? "✅ Ativo" : "🚫 Inativo"}.`); 
+        // CORREÇÃO: Alinhado para chatDeOrigemId
+        await this.enviarMensagemElegante(chatDeOrigemId, "STATUS", `👤 O motorista *${motorista.nome}* foi alterado para: ${novoStatus ? "✅ Ativo" : "🚫 Inativo"}.`); 
       } catch (error: unknown) { 
         console.error(`[ERRO ${acao}]:`, error);
-        await this.enviarMensagemElegante(this.grupoId, "ERRO", `❌ Falha ao alterar status: ${(error as Error).message}`);
+        // CORREÇÃO: Alinhado para chatDeOrigemId
+        await this.enviarMensagemElegante(chatDeOrigemId, "ERRO", `❌ Falha ao alterar status: ${(error as Error).message}`);
       } 
       return true; 
     }
+
     // Limpeza de caracteres invisíveis Unicode (ex: ZWSP) que quebram o parser
     const textoLimpo = comando.replace(/[\u2000-\u200B\u2028\u2029\uFEFF]/g, '').trim();
 
@@ -610,14 +646,15 @@ private async processarComandosAdmin(msg: proto.IWebMessageInfo, comando: string
       const diaDigitado = parseInt(parametro, 10);
 
       if (isNaN(diaDigitado) || diaDigitado < 1 || diaDigitado > 31) {
-        await this.enviarMensagemElegante(this.grupoId, "ERRO", "❌ Use: `@refazer [dia]` (Exemplo: `@refazer 10`).");
+        // CORREÇÃO: Alinhado para chatDeOrigemId
+        await this.enviarMensagemElegante(chatDeOrigemId, "ERRO", "❌ Use: `@refazer [dia]` (Exemplo: `@refazer 10`).");
         return true;
       }
 
-      await this.enviarMensagemElegante(this.grupoId, "SISTEMA", `🔄 Localizando a lista gerada no dia ${diaDigitado.toString().padStart(2, '0')} para reprocessar...`);
+      // CORREÇÃO: Alinhado para chatDeOrigemId
+      await this.enviarMensagemElegante(chatDeOrigemId, "SISTEMA", `🔄 Localizando a lista gerada no dia ${diaDigitado.toString().padStart(2, '0')} para reprocessar...`);
 
       try {
-        // 🔥 FIX FUSO: Constrói a data de busca e gera o intervalo rígido no fuso de Brasília
         const dataAlvo = this.calcularDataAlvoSegura(diaDigitado);
         
         const inicioDia = new Date(dataAlvo);
@@ -625,7 +662,6 @@ private async processarComandosAdmin(msg: proto.IWebMessageInfo, comando: string
         const fimDia = new Date(dataAlvo);
         fimDia.setHours(23, 59, 59, 999);
 
-        // Busca utilizando BETWEEN nativo (Elimina o problema de fuso do CONVERT_TZ/DAY)
         const listaJoiaEncontrada = await AppDataSource.getRepository('ListaJoia')
           .createQueryBuilder("lista")
           .where("lista.dia BETWEEN :inicioDia AND :fimDia", { inicioDia, fimDia })
@@ -633,16 +669,19 @@ private async processarComandosAdmin(msg: proto.IWebMessageInfo, comando: string
           .getOne();
 
         if (!listaJoiaEncontrada) {
-          await this.enviarMensagemElegante(this.grupoId, "ERRO", `🚫 Não localizei nenhuma lista registrada no dia *${diaDigitado.toString().padStart(2, '0')}*.`);
+          // CORREÇÃO: Alinhado para chatDeOrigemId
+          await this.enviarMensagemElegante(chatDeOrigemId, "ERRO", `🚫 Não localizei nenhuma lista registrada no dia *${diaDigitado.toString().padStart(2, '0')}*.`);
           return true;
         }
 
         const relatorioFormatado = await this.escalaService.gerarEscalaCompleta((listaJoiaEncontrada as any).id);
-        await this.enviarMensagemElegante(this.grupoId, "📋 ESCALA ATUALIZADA", relatorioFormatado);
+        // CORREÇÃO: Alinhado para chatDeOrigemId
+        await this.enviarMensagemElegante(chatDeOrigemId, "📋 ESCALA ATUALIZADA", relatorioFormatado);
 
       } catch (error: any) {
         console.error("Falha ao reprocessar comando admin @refazer:", error);
-        await this.enviarMensagemElegante(this.grupoId, "FALHA CRÍTICA", `❌ Erro interno ao reprocessar: ${error.message}`);
+        // CORREÇÃO: Alinhado para chatDeOrigemId
+        await this.enviarMensagemElegante(chatDeOrigemId, "FALHA CRÍTICA", `❌ Erro interno ao reprocessar: ${error.message}`);
       }
       return true;
     }
@@ -652,7 +691,8 @@ private async processarComandosAdmin(msg: proto.IWebMessageInfo, comando: string
       const diaDigitado = parseInt(parametro, 10);
 
       if (isNaN(diaDigitado) || diaDigitado < 1 || diaDigitado > 31) {
-        await this.enviarMensagemElegante(this.grupoId, "ERRO", "❌ *Escolha o dia da lista.*\n\nUse: `@escala_tarde [dia]` (Exemplo: `@escala_tarde 4`).");
+        // CORREÇÃO: Alinhado para chatDeOrigemId
+        await this.enviarMensagemElegante(chatDeOrigemId, "ERRO", "❌ *Escolha o dia da lista.*\n\nUse: `@escala_tarde [dia]` (Exemplo: `@escala_tarde 4`).");
         return true;
       }
 
@@ -661,9 +701,11 @@ private async processarComandosAdmin(msg: proto.IWebMessageInfo, comando: string
         const diaReal = dataAlvo.getDate();
 
         const { texto, mencoes } = await this.escalaService.obterTextoPeriodoTarde(diaReal);
-        await this.sock!.sendMessage(this.grupoId, { text: texto, mentions: mencoes });
+        // CORREÇÃO CRÍTICA: Responde direto no chatDeOrigemId
+        await this.sock!.sendMessage(chatDeOrigemId, { text: texto, mentions: mencoes });
       } catch (error: any) {
-        await this.enviarMensagemElegante(this.grupoId, "ERRO EXPORTAÇÃO", `❌ Erro ao extrair turno da tarde: ${error.message}`);
+        // CORREÇÃO: Alinhado para chatDeOrigemId
+        await this.enviarMensagemElegante(chatDeOrigemId, "ERRO EXPORTAÇÃO", `❌ Erro ao extrair turno da tarde: ${error.message}`);
       }
       return true;
     }
@@ -673,7 +715,8 @@ private async processarComandosAdmin(msg: proto.IWebMessageInfo, comando: string
       const diaDigitado = parseInt(parametro, 10);
 
       if (isNaN(diaDigitado) || diaDigitado < 1 || diaDigitado > 31) {
-        await this.enviarMensagemElegante(this.grupoId, "ERRO", "❌ *Escolha o dia da lista.*\n\nUse: `@escala_madrugada [dia]` (Exemplo: `@escala_madrugada 4`).");
+        // CORREÇÃO: Alinhado para chatDeOrigemId
+        await this.enviarMensagemElegante(chatDeOrigemId, "ERRO", "❌ *Escolha o dia da lista.*\n\nUse: `@escala_madrugada [dia]` (Exemplo: `@escala_madrugada 4`).");
         return true;
       }
 
@@ -682,9 +725,11 @@ private async processarComandosAdmin(msg: proto.IWebMessageInfo, comando: string
         const diaReal = dataAlvo.getDate();
 
         const { texto, mencoes } = await this.escalaService.obterTextoPeriodoMadrugada(diaReal);
-        await this.sock!.sendMessage(this.grupoId, { text: texto, mentions: mencoes });
+        // CORREÇÃO CRÍTICA: Responde direto no chatDeOrigemId
+        await this.sock!.sendMessage(chatDeOrigemId, { text: texto, mentions: mencoes });
       } catch (error: any) {
-        await this.enviarMensagemElegante(this.grupoId, "ERRO EXPORTAÇÃO", `❌ Erro ao extrair turno da madrugada: ${error.message}`);
+        // CORREÇÃO: Alinhado para chatDeOrigemId
+        await this.enviarMensagemElegante(chatDeOrigemId, "ERRO EXPORTAÇÃO", `❌ Erro ao extrair turno da madrugada: ${error.message}`);
       }
       return true;
     }
@@ -694,7 +739,8 @@ private async processarComandosAdmin(msg: proto.IWebMessageInfo, comando: string
       const diaDigitado = parseInt(parametro, 10);
 
       if (isNaN(diaDigitado) || diaDigitado < 1 || diaDigitado > 31) {
-        await this.enviarMensagemElegante(this.grupoId, "ERRO", "❌ *Escolha o dia da lista.*\n\nUse: `@escala_completa [dia]` (Exemplo: `@escala_completa 4`).");
+        // CORREÇÃO: Alinhado para chatDeOrigemId
+        await this.enviarMensagemElegante(chatDeOrigemId, "ERRO", "❌ *Escolha o dia da lista.*\n\nUse: `@escala_completa [dia]` (Exemplo: `@escala_completa 4`).");
         return true;
       }
 
@@ -708,23 +754,30 @@ private async processarComandosAdmin(msg: proto.IWebMessageInfo, comando: string
         const textoUnificado = `${resultadoTarde.texto}\n\n=============================\n\n${resultadoMadrugada.texto}`;
         const mencoesUnificadas = [...resultadoTarde.mencoes, ...resultadoMadrugada.mencoes];
 
-        await this.sock!.sendMessage(this.grupoId, { text: textoUnificado, mentions: mencoesUnificadas });
+        // CORREÇÃO CRÍTICA: Responde direto no chatDeOrigemId
+        await this.sock!.sendMessage(chatDeOrigemId, { text: textoUnificado, mentions: mencoesUnificadas });
       } catch (error: any) {
-        await this.enviarMensagemElegante(this.grupoId, "ERRO EXPORTAÇÃO", `❌ Erro ao extrair texto completo: ${error.message}`);
+        // CORREÇÃO: Alinhado para chatDeOrigemId
+        await this.enviarMensagemElegante(chatDeOrigemId, "ERRO EXPORTAÇÃO", `❌ Erro ao extrair texto completo: ${error.message}`);
       }
       return true;
     }
 
     // COMANDO ADMINISTRATIVO: @escala [dia_da_geracao]
+    // 1. CAPTURA DINÂMICA DO CHAT ATUAL (Evita vazamentos no grupo de produção)
+    // COMANDO ADMINISTRATIVO: @escala [dia_da_geracao] (Continuação / Bloco Final)
     if (acao === '@escala') {
       const diaDigitado = parseInt(parametro, 10);
 
       if (isNaN(diaDigitado) || diaDigitado < 1 || diaDigitado > 31) {
-        await this.enviarMensagemElegante(this.grupoId, "ERRO", "❌ Use: `@escala [dia]` (Exemplo: `@escala 10`).");
+        // CORREÇÃO: Alinhado para chatDeOrigemId
+        await this.enviarMensagemElegante(chatDeOrigemId, "ERRO", "❌ Use: `@escala [dia]` (Exemplo: `@escala 10`).");
         return true; 
       }
 
-      await this.enviarMensagemElegante(this.grupoId, "SISTEMA", `🔄 Buscando a lista gerada no dia *${diaDigitado.toString().padStart(2, '0')}*...`);
+      // CORREÇÃO: Alinhado para chatDeOrigemId
+      await this.enviarMensagemElegante(chatDeOrigemId, "SISTEMA", `🔄 Buscando a lista gerada no dia *${diaDigitado.toString().padStart(2, '0')}*...`);
+      
       try {
         // 🔥 FIX FUSO DEFINITIVO: Converte o dia informado em uma data segura baseada no fuso de São Paulo
         const dataAlvo = this.calcularDataAlvoSegura(diaDigitado);
@@ -742,23 +795,25 @@ private async processarComandosAdmin(msg: proto.IWebMessageInfo, comando: string
           .getOne();
 
         if (!listaJoiaEncontrada) {
-          await this.enviarMensagemElegante(this.grupoId, "ERRO", `🚫 Não localizei nenhuma lista registrada no dia *${diaDigitado.toString().padStart(2, '0')}*.`);
+          // CORREÇÃO: Alinhado para chatDeOrigemId
+          await this.enviarMensagemElegante(chatDeOrigemId, "ERRO", `🚫 Não localizei nenhuma lista registrada no dia *${diaDigitado.toString().padStart(2, '0')}*.`);
           return true; 
         }
 
         const relatorioFormatado = await this.escalaService.gerarEscalaCompleta((listaJoiaEncontrada as any).id);
-        await this.enviarMensagemElegante(this.grupoId, "📋 ESCALA ATUALIZADA", relatorioFormatado);
+        // CORREÇÃO: Alinhado para chatDeOrigemId
+        await this.enviarMensagemElegante(chatDeOrigemId, "📋 ESCALA ATUALIZADA", relatorioFormatado);
 
       } catch (error: any) {
         console.error("Falha ao reprocessar comando admin @escala:", error);
-        await this.enviarMensagemElegante(this.grupoId, "FALHA CRÍTICA", `❌ Erro interno ao reprocessar: ${error.message}`);
+        // CORREÇÃO: Alinhado para chatDeOrigemId
+        await this.enviarMensagemElegante(chatDeOrigemId, "FALHA CRÍTICA", `❌ Erro interno ao reprocessar: ${error.message}`);
       }
       return true; 
     }
 
     return false; // Permite que a mensagem caia no fluxo de comandos de usuários comuns
   }
-
 
 
   private async enviarMensagemElegante(to: string | undefined, titulo: string, conteudo: string): Promise<void> { 

@@ -16,6 +16,7 @@ import formatarDataIsoPura from "../../utils/formatters/formatarDataPorDia";
 import IContagemRotas from "../../interfaces/IContagemRotas";
 import calcularPosicaoApoio from "../../utils/helpers/CalcularPosicaoApoio";
 import filtrarERecalcularEscala from "../../utils/helpers/FiltrarOuRecalcularEscala";
+import calcularMetaConfiguracao from "../../utils/helpers/CalcularMetaConfiguracao";
 
 export class EscalaService { 
   private readonly LIMITE_PLANTAO_PADRAO = 4; 
@@ -84,7 +85,81 @@ export class EscalaService {
       contagemRotas // 👈 4º Argumento adicionado aqui
     ); 
   }
- 
+
+static async obterMotoristaApoioEscalaMae(ano: number, mes: number, dia: number): Promise<any | null> {
+        // 📋 CORREÇÃO OPERACIONAL: Recua 1 dia em relação ao parâmetro recebido (Dia X - 1)
+        // Isso alcança exatamente a escala mãe que aconteceu no dia anterior ao Joinha atual.
+        const dataEscalaMaeAlvo = new Date(ano, mes, dia - 1, 12, 0, 0, 0);
+        const inicioDiaMae = new Date(dataEscalaMaeAlvo);
+        inicioDiaMae.setHours(0, 0, 0, 0);
+        const fimDiaMae = new Date(dataEscalaMaeAlvo);
+        fimDiaMae.setHours(23, 59, 59, 999);
+
+        const listaEscalaMae = await AppDataSource.getRepository(ListaJoia).createQueryBuilder("listaMae")
+            .where("listaMae.dia BETWEEN :inicioDiaMae AND :fimDiaMae", { inicioDiaMae, fimDiaMae })
+            .getOne();
+
+        if (!listaEscalaMae) return null;
+
+        // Busca a fila de joinhas da escala mãe
+        const filaJoinhasMae = await AppDataSource.getRepository(OrdemJoinha).find({
+            where: { listaJoia: { id: listaEscalaMae.id } },
+            relations: ["motorista"],
+            order: { 
+                isPenalizado: "ASC",
+                posicaoEfetiva: "ASC",
+                horaDoJoinha: "ASC"
+            }
+        });
+
+        // 📋 FILTRO SOLICITADO: Remove da contagem qualquer motorista que esteja com podeFazerRota === false
+        const filaFiltradaValida = filaJoinhasMae.filter(reg => reg.motorista?.podeFazerRota !== false);
+
+        // Configuração das metas espelhadas no mesmo padrão imutável do endpoint de escala para o dia simulado
+        const dataTardeMae = new Date(ano, mes, dia, 12, 0, 0, 0);
+        const dataMadrugadaMae = new Date(ano, mes, dia + 1, 12, 0, 0, 0);
+
+        const metaTardeMae = await calcularMetaConfiguracao(dataTardeMae);
+        const metaMadrugadaMae = await calcularMetaConfiguracao(dataMadrugadaMae);
+
+        if (!metaTardeMae || !metaMadrugadaMae) return null;
+
+        const temApoioValidoMae = metaTardeMae.tipoDia === 'DIA_COMUM' && metaMadrugadaMae.tipoDia === 'DIA_COMUM';
+
+        // Mapeia as posições aplicando as regras de alocação de categoria virtuais
+        const dadosFilaMapeada = filaFiltradaValida.map((reg, index) => {
+            const posicao = index + 1;
+            let category: "PLANTAO" | "ROTA" | "APOIO" | "BACKUP" | "LIVRE" = "BACKUP";
+
+            if (metaMadrugadaMae.tipoDia === 'DIA_COMUM') {
+                if (posicao <= metaMadrugadaMae.limitePlantao) {
+                    category = "PLANTAO";
+                } else if (temApoioValidoMae && posicao === metaTardeMae.posicaoDoApoio) {
+                    category = "APOIO";
+                } else if (posicao > metaMadrugadaMae.limitePlantao && posicao <= metaMadrugadaMae.qtdMaxRotasValidas) {
+                    category = "ROTA"; 
+                }
+            } else {
+                if (posicao <= metaMadrugadaMae.limitePlantao) category = "PLANTAO";
+                else category = "LIVRE";
+            }
+
+            return {
+                categoria: category,
+                isApoioManual: reg.isApoioManual || false,
+                motorista: reg.motorista
+            };
+        });
+
+        // Filtro sequencial de prioridade de apoio baseado no mapeamento virtual
+        const apoioManual = dadosFilaMapeada.find(p => p.isApoioManual === true);
+        const tipoApoioComum = dadosFilaMapeada.find(p => p.categoria === "APOIO");
+
+        if (apoioManual && apoioManual.motorista) return apoioManual.motorista;
+        if (tipoApoioComum && tipoApoioComum.motorista) return tipoApoioComum.motorista;
+
+        return null;
+    } 
 
   private async identificarTipoDia(data: Date): Promise<TipoDia> { 
     const dataIso = formatarDataIsoPura(data);
@@ -427,7 +502,7 @@ export class EscalaService {
    * Constrói o texto formatado das escalas da Tarde (Dia X + 1) com ícones dinâmicos via banco de dados
    * GARANTIA: Lista absolutamente todas as rotas da tarde, inclusive as vagas/sem motorista.
    */
-  async obterTextoPeriodoTarde(diaDoJoinha: number): Promise<{ texto: string; mencoes: string[] }> {
+async obterTextoPeriodoTarde(diaDoJoinha: number): Promise<{ texto: string; mencoes: string[] }> {
     const dataAtual = new Date();
     const dataListaJoia = new Date(dataAtual.getFullYear(), dataAtual.getMonth(), diaDoJoinha, 0, 0, 0, 0);
     const dataIsoPura = formatarDataIsoPura(dataListaJoia);
@@ -438,7 +513,14 @@ export class EscalaService {
 
     if (!listaJoia) throw new Error(`Nenhuma lista encontrada para o dia ${diaDoJoinha}.`);
 
+    // Janela Comum: +1 Dia (Se digita 11, a execução física na tarde é dia 12)
     const dataTardeOperacional = this.calcularDataFutura(listaJoia.dia, 1);
+    const dataTardeIsoString = formatarDataIsoPura(dataTardeOperacional); // Ex: "2026-06-12"
+    
+    // Janela do Apoio: +2 Dias (Se digita 11, a rota física de apoio é calculada no dia 13)
+    const dataApoioOperacional = this.calcularDataFutura(listaJoia.dia, 2);
+    const dataApoioIsoString = formatarDataIsoPura(dataApoioOperacional); // Ex: "2026-06-13"
+
     const dataFormatada = `${dataTardeOperacional.getDate().toString().padStart(2, '0')}/${(dataTardeOperacional.getMonth() + 1).toString().padStart(2, '0')}/${dataTardeOperacional.getFullYear()}`;
     const diaSemanaTexto = this.obterNomeDiaSemana(dataTardeOperacional);
 
@@ -454,34 +536,77 @@ export class EscalaService {
     const mencoes: string[] = [];
     if (todasAsRotasTarde.length === 0) return { texto: `📭 Nenhuma rota cadastrada para o turno da Tarde no sistema.`, mencoes };
 
-    // 2. BUSCA AS ATRIBUIÇÕES EFETUADAS DE FORMA ISOLADA NO DIA OPERACIONAL
+    // 2. BUSCA AS ATRIBUIÇÕES EFETUADAS TRAZENDO AS DUAS JANELAS DE DATAS DO BANCO
     const atribuicoes = await this.atribuicaoRepositorio.createQueryBuilder("atrib")
       .leftJoinAndSelect("atrib.motorista", "motorista")
       .leftJoinAndSelect("atrib.rota", "rota")
       .where("atrib.listaJoiaId = :listaId", { listaId: listaJoia.id })
-      .andWhere("DATE(atrib.dataGeracao) = :dataTardeIsoString", { dataTardeIsoString: formatarDataIsoPura(dataTardeOperacional) })
+      .andWhere(
+        "(DATE(atrib.dataGeracao) = :dataTardeIsoString OR DATE(atrib.dataGeracao) = :dataApoioIsoString)", 
+        { dataTardeIsoString, dataApoioIsoString }
+      )
       .getMany();
+
+    // Passa o diaDoJoinha PURO para o robô calcular a escala mãe dinamicamente
+    let motoristaDoApoio: any = null;
+    try {
+        motoristaDoApoio = await EscalaService.obterMotoristaApoioEscalaMae(
+            dataTardeOperacional.getFullYear(), 
+            dataTardeOperacional.getMonth(), 
+            diaDoJoinha
+        );
+    } catch (e) {
+        motoristaDoApoio = null;
+    }
 
     let texto = `🌅 *Atendimento do turno da tarde:*\n📅 *Execução:* ${diaSemanaTexto} (${dataFormatada})\n\n`;
 
+    const totalRotasTarde = todasAsRotasTarde.length;
+
     // 3. MAPEAMENTO COMPLETO PERCORRENDO AS ROTAS REAIS
-    todasAsRotasTarde.forEach(rota => {
+    todasAsRotasTarde.forEach((rota, index) => {
       const identificadorRota = (rota.ordem || '').trim(); 
       const nomeBairroOuTrajeto = (rota.nome || '').trim(); 
       const horario = rota.horario || '18h00';
       
-      const atribExistente = atribuicoes.find(a => a.rota?.id === rota.id);
+      const numeroRotaAtual = rota.ordem ? parseInt(rota.ordem.replace(/[^0-9]/g, ''), 10) : 0;
+      const ehApoioReal = (numeroRotaAtual === totalRotasTarde);
+
+      // Determina a string de comparação de data correta para cada linha da lista
+      const dataFiltroAlvo = ehApoioReal ? dataApoioIsoString : dataTardeIsoString;
+
+      // FIX FUSO DEFINITIVO: Extrai a string pura do banco ou usa getUTC para blindar a leitura
+      const atribExistente = atribuicoes.find(a => {
+          if (!a.rota || a.rota.id !== rota.id || !a.dataGeracao) return false;
+          
+          // Se dataGeracao já for uma string curta (YYYY-MM-DD), fatia direto. Se for objeto Date, usa UTC.
+          const d = new Date(a.dataGeracao);
+          const stringDataBanco = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+          
+          return stringDataBanco === dataFiltroAlvo;
+      });
+
+      let motoristaEscolhido = null;
+
+      // Hierarquia estável de exibição de motoristas (Idêntica ao painel e à madrugada)
+      if (atribExistente) {
+          motoristaEscolhido = atribExistente.motorista || null; // Se removeu na tela, mantém null
+      } 
+      else if (ehApoioReal) {
+          if (motoristaDoApoio) motoristaEscolhido = motoristaDoApoio;
+      }
+
       let nomeMotorista = '_(Sem motorista escalado)_';
       
-      if (atribExistente && atribExistente.motorista) {
-        if (atribExistente.motorista.whatsAppLid) {
-          const jidCompletoLid = atribExistente.motorista.whatsAppLid.includes('@') 
-            ? atribExistente.motorista.whatsAppLid 
-            : `${atribExistente.motorista.whatsAppLid}@lid`;
+      if (motoristaEscolhido) {
+        if (motoristaEscolhido.whatsAppLid) {
+          const jidCompletoLid = motoristaEscolhido.whatsAppLid.includes('@') 
+            ? motoristaEscolhido.whatsAppLid 
+            : `${motoristaEscolhido.whatsAppLid}@lid`;
           mencoes.push(jidCompletoLid);
-          nomeMotorista = `@${atribExistente.motorista.whatsAppLid}`;
+          nomeMotorista = `@${motoristaEscolhido.whatsAppLid}`;
         } else {
-          nomeMotorista = `*${atribExistente.motorista.nome}*`;
+          nomeMotorista = `*${motoristaEscolhido.nome}*`;
         }
       }
 
@@ -512,7 +637,8 @@ export class EscalaService {
     });
 
     return { texto: texto.trim(), mencoes };
-  }
+}
+
   /**
    * Constrói o texto formatado das escalas da Madrugada e Apoio (Dia X + 2) com ícones dinâmicos via banco de dados
    * GARANTIA: Lista absolutamente todas as rotas da madrugada cadastradas, inclusive as vagas/sem motorista.
